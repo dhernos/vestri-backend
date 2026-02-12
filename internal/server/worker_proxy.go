@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"yourapp/internal/auth"
 )
 
@@ -45,24 +46,29 @@ func (s *Server) handleWorkerProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	baseURL, err := url.Parse(s.Config.WorkerAPIURL)
-	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
-		writeError(w, http.StatusInternalServerError, "Worker API URL is not configured")
+	nodeRef := strings.TrimSpace(chi.URLParam(r, "nodeRef"))
+	if nodeRef == "" {
+		writeError(w, http.StatusBadRequest, "nodeRef is required")
 		return
 	}
 
-	apiKey, err := s.workerAPIKeyForUser(sess.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Worker API key is not configured")
-		return
-	}
-
-	workerPath := strings.TrimPrefix(r.URL.Path, "/api/worker")
-	if workerPath == "" {
+	workerPath := "/" + strings.TrimPrefix(chi.URLParam(r, "*"), "/")
+	if workerPath == "/" {
 		workerPath = "/"
 	}
-	if !strings.HasPrefix(workerPath, "/") {
-		workerPath = "/" + workerPath
+
+	node, baseURL, apiKey, err := s.workerTargetForUserNode(r.Context(), sess.UserID, nodeRef)
+	if err != nil {
+		if errors.Is(err, errWorkerNodeNotFound) {
+			writeError(w, http.StatusNotFound, "Node not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "Node worker configuration is invalid")
+		return
+	}
+	if !canUseWorkerPath(node.AccessRole, r.Method, workerPath) {
+		writeError(w, http.StatusForbidden, "Node permission denied for this action")
+		return
 	}
 
 	isUpload := r.Method == http.MethodPost && workerPath == "/fs/upload"
@@ -176,14 +182,34 @@ func (s *Server) handleWorkerProxy(w http.ResponseWriter, r *http.Request) {
 		log.Printf("worker proxy: user=%s method=%s path=%s copy_error=%v", sess.UserID, r.Method, signedPath, err)
 	}
 
-	log.Printf("worker proxy: user=%s method=%s path=%s status=%d", sess.UserID, r.Method, signedPath, resp.StatusCode)
+	log.Printf("worker proxy: user=%s node=%s method=%s path=%s status=%d", sess.UserID, nodeRef, r.Method, signedPath, resp.StatusCode)
 }
 
-func (s *Server) workerAPIKeyForUser(userID string) (string, error) {
-	if s.Config.WorkerAPIKey != "" {
-		return s.Config.WorkerAPIKey, nil
+var errWorkerNodeNotFound = errors.New("worker node not found")
+
+func (s *Server) workerTargetForUserNode(ctx context.Context, userID, nodeRef string) (*auth.WorkerNode, *url.URL, string, error) {
+	node, err := s.Users.FindAccessibleWorkerNodeByRef(ctx, userID, nodeRef)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	return "", errors.New("worker api key missing")
+	if node == nil {
+		return nil, nil, "", errWorkerNodeNotFound
+	}
+
+	baseURL, err := url.Parse(node.BaseURL)
+	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
+		return nil, nil, "", errors.New("worker node base URL is invalid")
+	}
+
+	apiKey, err := s.decryptNodeAPIKey(node)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, nil, "", errors.New("worker node api key is missing")
+	}
+
+	return node, baseURL, apiKey, nil
 }
 
 func signWorkerRequest(apiKey, ts, nonce, method, path string) string {

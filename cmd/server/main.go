@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"yourapp/internal/auth"
@@ -43,6 +45,21 @@ func main() {
 	}
 	defer db.Close()
 
+	if autoMigrateEnabled() {
+		migrationsDir := os.Getenv("MIGRATIONS_DIR")
+		if migrationsDir == "" {
+			migrationsDir = "./migrations"
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		if err := database.ApplyMigrations(ctx, db, migrationsDir); err != nil {
+			log.Fatalf("migration error: %v", err)
+		}
+		log.Printf("database migrations applied from %s", migrationsDir)
+	}
+
 	redisClient, err := redisx.New(cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("redis error: %v", err)
@@ -73,4 +90,12 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func autoMigrateEnabled() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("AUTO_MIGRATE")))
+	if raw == "" {
+		return true
+	}
+	return raw == "1" || raw == "true" || raw == "yes"
 }

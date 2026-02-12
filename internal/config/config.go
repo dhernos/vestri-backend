@@ -11,21 +11,22 @@ import (
 )
 
 type Config struct {
-	Port           string
-	BaseURL        string
-	DatabaseURL    string
-	RedisURL       string
-	UploadDir      string
-	LogFile        string
-	NoEmailVerify  bool
-	SessionTTL     time.Duration
-	TOTPIssuer     string
-	WorkerAPIURL   string
-	WorkerAPIKey   string
-	Email          EmailConfig
-	TrustedProxies []string
-	WebAuthn       WebAuthnConfig
-	OAuth          OAuthConfig
+	Port                    string
+	BaseURL                 string
+	DatabaseURL             string
+	RedisURL                string
+	UploadDir               string
+	LogFile                 string
+	NoEmailVerify           bool
+	SessionTTL              time.Duration
+	TOTPIssuer              string
+	WorkerAPIURL            string
+	WorkerAPIKey            string
+	NodeAPIKeyEncryptionKey string
+	Email                   EmailConfig
+	TrustedProxies          []string
+	WebAuthn                WebAuthnConfig
+	OAuth                   OAuthConfig
 }
 
 type EmailConfig struct {
@@ -70,18 +71,19 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Port:           getenvDefault("PORT", "8080"),
-		BaseURL:        firstNonEmpty(os.Getenv("APP_BASE_URL"), os.Getenv("NEXTAUTH_URL"), "http://localhost:3000"),
-		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		RedisURL:       getenvDefault("REDIS_URL", "redis://localhost:6379"),
-		UploadDir:      getenvDefault("UPLOAD_DIR", "../auth_template/public/uploads"),
-		LogFile:        getenvDefault("LOG_FILE", "logs/server.log"),
-		NoEmailVerify:  parseBool(os.Getenv("NO_EMAIL_VERIFY")),
-		SessionTTL:     7 * 24 * time.Hour,
-		TOTPIssuer:     getenvDefault("TOTP_ISSUER", "AuthService"),
-		WorkerAPIURL:   getenvDefault("WORKER_API_URL", "http://localhost:8031"),
-		WorkerAPIKey:   os.Getenv("WORKER_API_KEY"),
-		TrustedProxies: parseList(os.Getenv("TRUSTED_PROXIES")),
+		Port:                    getenvDefault("PORT", "8080"),
+		BaseURL:                 firstNonEmpty(os.Getenv("APP_BASE_URL"), os.Getenv("NEXTAUTH_URL"), "http://localhost:3000"),
+		DatabaseURL:             os.Getenv("DATABASE_URL"),
+		RedisURL:                getenvDefault("REDIS_URL", "redis://localhost:6379"),
+		UploadDir:               getenvDefault("UPLOAD_DIR", "../auth_template/public/uploads"),
+		LogFile:                 getenvDefault("LOG_FILE", "logs/server.log"),
+		NoEmailVerify:           parseBool(os.Getenv("NO_EMAIL_VERIFY")),
+		SessionTTL:              7 * 24 * time.Hour,
+		TOTPIssuer:              getenvDefault("TOTP_ISSUER", "AuthService"),
+		WorkerAPIURL:            getenvDefault("WORKER_API_URL", "http://localhost:8031"),
+		WorkerAPIKey:            os.Getenv("WORKER_API_KEY"),
+		NodeAPIKeyEncryptionKey: os.Getenv("NODE_API_KEY_ENCRYPTION_KEY"),
+		TrustedProxies:          parseList(os.Getenv("TRUSTED_PROXIES")),
 	}
 
 	cfg.Email = EmailConfig{

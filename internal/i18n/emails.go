@@ -32,6 +32,10 @@ type emailStrings struct {
 	SignInText    string
 	SignInHTML    string
 
+	NodeInviteSubject string
+	NodeInviteText    string
+	NodeInviteHTML    string
+
 	UnknownLocation string
 	UnknownDevice   string
 }
@@ -74,6 +78,16 @@ var emailTranslations = map[string]emailStrings{
 			"<li><strong>Device:</strong> {device}</li></ul>" +
 			"<p>If this wasn't you, please reset your password and revoke other sessions.</p>",
 
+		NodeInviteSubject: "You were invited to a node",
+		NodeInviteText: "You were invited to node \"{node}\" by {inviter}.\n" +
+			"Role: {permission}\n" +
+			"Expires: {expires}\n\n" +
+			"Open your nodes page to accept: {link}",
+		NodeInviteHTML: "<p>You were invited to node <strong>{node}</strong> by {inviter}.</p>" +
+			"<p><strong>Role:</strong> {permission}<br/>" +
+			"<strong>Expires:</strong> {expires}</p>" +
+			"<p><a href=\"{link}\">Open nodes page to accept invite</a></p>",
+
 		UnknownLocation: "Unknown location",
 		UnknownDevice:   "Unknown device",
 	},
@@ -113,6 +127,16 @@ var emailTranslations = map[string]emailStrings{
 			"<li><strong>Ort:</strong> {location}</li>" +
 			"<li><strong>Ger\u00e4t:</strong> {device}</li></ul>" +
 			"<p>Wenn Sie das nicht waren, setzen Sie bitte Ihr Passwort zur\u00fcck und beenden Sie andere Sitzungen.</p>",
+
+		NodeInviteSubject: "Sie wurden zu einer Node eingeladen",
+		NodeInviteText: "Sie wurden von {inviter} zur Node \"{node}\" eingeladen.\n" +
+			"Rolle: {permission}\n" +
+			"G\u00fcltig bis: {expires}\n\n" +
+			"Zum Annehmen \u00f6ffnen: {link}",
+		NodeInviteHTML: "<p>Sie wurden von {inviter} zur Node <strong>{node}</strong> eingeladen.</p>" +
+			"<p><strong>Rolle:</strong> {permission}<br/>" +
+			"<strong>G\u00fcltig bis:</strong> {expires}</p>" +
+			"<p><a href=\"{link}\">Nodes-Seite zum Annehmen \u00f6ffnen</a></p>",
 
 		UnknownLocation: "Unbekannter Ort",
 		UnknownDevice:   "Unbekanntes Ger\u00e4t",
@@ -206,5 +230,21 @@ func SignInAlertEmail(locale, email, loginTime, ip, location, device string) Ema
 		Subject: templates.SignInSubject,
 		Text:    renderTemplate(templates.SignInText, values),
 		HTML:    renderTemplate(templates.SignInHTML, values),
+	}
+}
+
+func NodeInviteEmail(locale, inviter, node, permission, expires, link string) EmailContent {
+	templates := emailStringsForLocale(locale)
+	values := map[string]string{
+		"inviter":    inviter,
+		"node":       node,
+		"permission": permission,
+		"expires":    expires,
+		"link":       link,
+	}
+	return EmailContent{
+		Subject: templates.NodeInviteSubject,
+		Text:    renderTemplate(templates.NodeInviteText, values),
+		HTML:    renderTemplate(templates.NodeInviteHTML, values),
 	}
 }

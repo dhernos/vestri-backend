@@ -50,8 +50,18 @@ var endpointAccess = []AccessRule{
 	{Method: http.MethodPost, Path: "/api/passkeys/register/finish", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/passkeys", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodDelete, Path: "/api/passkeys/{id}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
-	{Method: http.MethodGet, Path: "/api/worker/*", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
-	{Method: http.MethodPost, Path: "/api/worker/*", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPost, Path: "/api/nodes", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/invites", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPost, Path: "/api/nodes/invites/{inviteId}/accept", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/invites", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/invites", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodDelete, Path: "/api/nodes/{nodeRef}/invites/{inviteId}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/guests", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodDelete, Path: "/api/nodes/{nodeRef}/guests/{guestUserId}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/worker/*", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/worker/*", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 }
 
 func accessRoles(method, path string) []string {

@@ -24,6 +24,7 @@ type Server struct {
 	Redis          *redis.Client
 	Config         config.Config
 	Hasher         auth.PasswordHasher
+	NodeAPIKey     *nodeAPIKeyCipher
 	trustedProxies []net.IPNet
 	WebAuthn       *webauthn.WebAuthn
 	WebAuthnStore  *auth.WebAuthnSessionStore
@@ -39,6 +40,11 @@ func NewServer(cfg config.Config, users *auth.UserRepository, sessions *auth.Ses
 		return nil, err
 	}
 
+	nodeCipher, err := newNodeAPIKeyCipher(cfg.NodeAPIKeyEncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Server{
 		Users:          users,
 		Sessions:       sessions,
@@ -48,6 +54,7 @@ func NewServer(cfg config.Config, users *auth.UserRepository, sessions *auth.Ses
 		TOTP:           totp,
 		Config:         cfg,
 		Hasher:         hasher,
+		NodeAPIKey:     nodeCipher,
 		trustedProxies: parseProxyCIDRs(cfg.TrustedProxies),
 		WebAuthn:       wa,
 		WebAuthnStore:  &auth.WebAuthnSessionStore{Redis: redisClient},
@@ -107,8 +114,18 @@ func (s *Server) Router() http.Handler {
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/passkeys"))).Get("/api/passkeys", s.handleListPasskeys)
 		pr.With(s.requireRoles(accessRoles(http.MethodDelete, "/api/passkeys/{id}"))).Delete("/api/passkeys/{id}", s.handleDeletePasskey)
 
-		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/worker/*"))).Get("/api/worker/*", s.handleWorkerProxy)
-		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/worker/*"))).Post("/api/worker/*", s.handleWorkerProxy)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes"))).Get("/api/nodes", s.handleListNodes)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes"))).Post("/api/nodes", s.handleCreateNode)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/invites"))).Get("/api/nodes/invites", s.handleListIncomingNodeInvites)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/invites/{inviteId}/accept"))).Post("/api/nodes/invites/{inviteId}/accept", s.handleAcceptNodeInvite)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}"))).Get("/api/nodes/{nodeRef}", s.handleGetNode)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/invites"))).Get("/api/nodes/{nodeRef}/invites", s.handleListNodeInvites)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/invites"))).Post("/api/nodes/{nodeRef}/invites", s.handleCreateNodeInvite)
+		pr.With(s.requireRoles(accessRoles(http.MethodDelete, "/api/nodes/{nodeRef}/invites/{inviteId}"))).Delete("/api/nodes/{nodeRef}/invites/{inviteId}", s.handleRevokeNodeInvite)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/guests"))).Get("/api/nodes/{nodeRef}/guests", s.handleListNodeGuests)
+		pr.With(s.requireRoles(accessRoles(http.MethodDelete, "/api/nodes/{nodeRef}/guests/{guestUserId}"))).Delete("/api/nodes/{nodeRef}/guests/{guestUserId}", s.handleRemoveNodeGuest)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/worker/*"))).Get("/api/nodes/{nodeRef}/worker/*", s.handleWorkerProxy)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/worker/*"))).Post("/api/nodes/{nodeRef}/worker/*", s.handleWorkerProxy)
 	})
 
 	return r
