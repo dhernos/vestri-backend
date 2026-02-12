@@ -66,8 +66,13 @@ func (s *Server) handleWorkerProxy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Node worker configuration is invalid")
 		return
 	}
-	if !canUseWorkerPath(node.AccessRole, r.Method, workerPath) {
-		writeError(w, http.StatusForbidden, "Node permission denied for this action")
+	normalizedWorkerPath := "/" + strings.Trim(strings.TrimPrefix(workerPath, "/"), "/")
+	if normalizedWorkerPath == "/" {
+		normalizedWorkerPath = "/"
+	}
+	allowHealthForMembers := r.Method == http.MethodGet && normalizedWorkerPath == "/health"
+	if !canUseNodeWorkerProxy(node.AccessRole) && !allowHealthForMembers {
+		writeError(w, http.StatusForbidden, "Only node owners can call generic worker proxy routes")
 		return
 	}
 

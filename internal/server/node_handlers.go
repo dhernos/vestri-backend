@@ -494,7 +494,7 @@ func (s *Server) handleListIncomingNodeInvites(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	invites, err := s.Users.ListIncomingWorkerNodeInvites(r.Context(), user.Email)
+	invites, err := s.Users.ListIncomingGameServerInvites(r.Context(), user.Email)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to load incoming invites")
 		return
@@ -502,7 +502,7 @@ func (s *Server) handleListIncomingNodeInvites(w http.ResponseWriter, r *http.Re
 
 	resp := make([]map[string]interface{}, 0, len(invites))
 	for i := range invites {
-		resp = append(resp, buildNodeInviteResponse(&invites[i]))
+		resp = append(resp, buildGameServerInviteResponse(&invites[i]))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -529,19 +529,38 @@ func (s *Server) handleAcceptNodeInvite(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	node, err := s.Users.AcceptWorkerNodeInvite(r.Context(), inviteID, sess.UserID, user.Email)
+	invite, err := s.Users.AcceptGameServerInvite(r.Context(), inviteID, sess.UserID, user.Email)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to accept invite")
 		return
 	}
-	if node == nil {
+	if invite == nil {
 		writeError(w, http.StatusNotFound, "Invite not found or expired")
+		return
+	}
+
+	node, err := s.Users.FindAccessibleWorkerNodeByRef(r.Context(), sess.UserID, invite.NodeID)
+	if err != nil || node == nil {
+		writeError(w, http.StatusInternalServerError, "Failed to load invited node")
+		return
+	}
+
+	serverAccess, err := s.Users.FindAccessibleGameServerByRefForNode(r.Context(), sess.UserID, node, invite.ServerID)
+	if err != nil || serverAccess == nil {
+		writeError(w, http.StatusInternalServerError, "Failed to load invited game server")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": "Invite accepted.",
 		"node":    buildNodeResponse(node),
+		"server": buildGameServerResponse(
+			&serverAccess.GameServer,
+			buildGameServerPermissions(node.AccessRole, serverAccess.AccessRole),
+			"unknown",
+			"",
+			"",
+		),
 	})
 }
 

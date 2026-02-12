@@ -44,6 +44,7 @@ type gameServerPermissions struct {
 	CanControl     bool `json:"canControl"`
 	CanManageFiles bool `json:"canManageFiles"`
 	CanReadConsole bool `json:"canReadConsole"`
+	CanManage      bool `json:"canManage"`
 }
 
 type gameServerResponse struct {
@@ -73,10 +74,6 @@ func (s *Server) handleListGameServerTemplates(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if !canViewGameServers(node.AccessRole) {
-		writeError(w, http.StatusForbidden, "Node permission denied for this action")
-		return
-	}
 
 	templates, err := gameServerTemplates()
 	if err != nil {
@@ -98,23 +95,19 @@ func (s *Server) handleListGameServerTemplates(w http.ResponseWriter, r *http.Re
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"templates":   resp,
-		"permissions": buildGameServerPermissions(node.AccessRole),
+		"permissions": buildGameServerPermissions(node.AccessRole, auth.NodeAccessViewer),
 	})
 }
 
 func (s *Server) handleListGameServers(w http.ResponseWriter, r *http.Request) {
-	_, node, ok := s.loadNodeForGameServerRequest(w, r)
+	sess, node, ok := s.loadNodeForGameServerRequest(w, r)
 	if !ok {
 		return
 	}
-	if !canViewGameServers(node.AccessRole) {
-		writeError(w, http.StatusForbidden, "Node permission denied for this action")
-		return
-	}
 
-	servers, err := s.Users.ListGameServersForNode(r.Context(), node.ID)
+	servers, err := s.Users.ListAccessibleGameServersForNode(r.Context(), sess.UserID, node)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to load game servers")
+		writeError(w, http.StatusInternalServerError, "Failed to load accessible game servers")
 		return
 	}
 
@@ -130,14 +123,17 @@ func (s *Server) handleListGameServers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	permissions := buildGameServerPermissions(node.AccessRole)
+	responsePermissions := gameServerPermissions{
+		CanCreate: canCreateGameServer(node.AccessRole),
+	}
 	resp := make([]gameServerResponse, 0, len(servers))
 	for i := range servers {
 		state := "unknown"
 		output := ""
 		statusErr := ""
+		permissions := buildGameServerPermissions(node.AccessRole, servers[i].AccessRole)
 
-		if includeStatus {
+		if includeStatus && canReadGameServerConsole(servers[i].AccessRole) {
 			resolvedState, resolvedOutput, resolveErr := s.workerStackStatus(r.Context(), baseURL, apiKey, servers[i].StackName)
 			state = resolvedState
 			output = resolvedOutput
@@ -146,12 +142,18 @@ func (s *Server) handleListGameServers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		resp = append(resp, buildGameServerResponse(&servers[i], permissions, state, output, statusErr))
+		responsePermissions.CanView = responsePermissions.CanView || permissions.CanView
+		responsePermissions.CanControl = responsePermissions.CanControl || permissions.CanControl
+		responsePermissions.CanManageFiles = responsePermissions.CanManageFiles || permissions.CanManageFiles
+		responsePermissions.CanReadConsole = responsePermissions.CanReadConsole || permissions.CanReadConsole
+		responsePermissions.CanManage = responsePermissions.CanManage || permissions.CanManage
+
+		resp = append(resp, buildGameServerResponse(&servers[i].GameServer, permissions, state, output, statusErr))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"servers":       resp,
-		"permissions":   permissions,
+		"permissions":   responsePermissions,
 		"includeStatus": includeStatus,
 	})
 }
@@ -274,26 +276,35 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	permissions := buildGameServerPermissions(node.AccessRole)
+	serverRole := auth.NodeAccessOwner
+	if sess.UserID != node.OwnerUserID {
+		serverRole = auth.NodeAccessAdmin
+		if err := s.Users.UpsertGameServerGuest(r.Context(), created.ID, sess.UserID, serverRole); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to grant creator access to the game server")
+			return
+		}
+	}
+
+	permissions := buildGameServerPermissions(node.AccessRole, serverRole)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"server": buildGameServerResponse(created, permissions, "unknown", "", ""),
 	})
 }
 
 func (s *Server) handleGetGameServer(w http.ResponseWriter, r *http.Request) {
-	_, node, server, ok := s.loadNodeAndGameServerForRequest(w, r)
+	_, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
 	if !ok {
 		return
 	}
-	if !canViewGameServers(node.AccessRole) {
-		writeError(w, http.StatusForbidden, "Node permission denied for this action")
+	if !canViewGameServer(serverRole) {
+		writeError(w, http.StatusForbidden, "Server permission denied for this action")
 		return
 	}
 
 	state := "unknown"
 	output := ""
 	statusErr := ""
-	if includeStatusRequested(r) {
+	if includeStatusRequested(r) && canReadGameServerConsole(serverRole) {
 		baseURL, apiKey, err := s.workerTargetFromNode(node)
 		if err == nil {
 			resolvedState, resolvedOutput, resolveErr := s.workerStackStatus(r.Context(), baseURL, apiKey, server.StackName)
@@ -307,19 +318,19 @@ func (s *Server) handleGetGameServer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	permissions := buildGameServerPermissions(node.AccessRole)
+	permissions := buildGameServerPermissions(node.AccessRole, serverRole)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"server": buildGameServerResponse(server, permissions, state, output, statusErr),
 	})
 }
 
 func (s *Server) handleGameServerStatus(w http.ResponseWriter, r *http.Request) {
-	_, node, server, ok := s.loadNodeAndGameServerForRequest(w, r)
+	_, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
 	if !ok {
 		return
 	}
-	if !canReadGameServerConsole(node.AccessRole) {
-		writeError(w, http.StatusForbidden, "Node permission denied for this action")
+	if !canReadGameServerConsole(serverRole) {
+		writeError(w, http.StatusForbidden, "Server permission denied for this action")
 		return
 	}
 
@@ -349,12 +360,12 @@ func (s *Server) handleStopGameServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) {
-	_, node, server, ok := s.loadNodeAndGameServerForRequest(w, r)
+	_, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
 	if !ok {
 		return
 	}
-	if !canCreateGameServer(node.AccessRole) {
-		writeError(w, http.StatusForbidden, "Only owner/admin can delete game servers")
+	if !canManageGameServer(serverRole) {
+		writeError(w, http.StatusForbidden, "Only server owner/admin can delete this game server")
 		return
 	}
 
@@ -385,12 +396,12 @@ func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleGameServerStackAction(w http.ResponseWriter, r *http.Request, action string) {
-	_, node, server, ok := s.loadNodeAndGameServerForRequest(w, r)
+	_, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
 	if !ok {
 		return
 	}
-	if !canControlGameServer(node.AccessRole) {
-		writeError(w, http.StatusForbidden, "Only owner/admin/operator can start or stop servers")
+	if !canControlGameServer(serverRole) {
+		writeError(w, http.StatusForbidden, "Only server owner/admin/operator can start or stop this server")
 		return
 	}
 
@@ -451,29 +462,29 @@ func (s *Server) loadNodeForGameServerRequest(w http.ResponseWriter, r *http.Req
 	return sess, node, true
 }
 
-func (s *Server) loadNodeAndGameServerForRequest(w http.ResponseWriter, r *http.Request) (*auth.Session, *auth.WorkerNode, *auth.GameServer, bool) {
+func (s *Server) loadNodeAndGameServerForRequest(w http.ResponseWriter, r *http.Request) (*auth.Session, *auth.WorkerNode, *auth.GameServer, string, bool) {
 	sess, node, ok := s.loadNodeForGameServerRequest(w, r)
 	if !ok {
-		return nil, nil, nil, false
+		return nil, nil, nil, "", false
 	}
 
 	serverRef := strings.TrimSpace(chi.URLParam(r, "serverRef"))
 	if serverRef == "" {
 		writeError(w, http.StatusBadRequest, "serverRef is required")
-		return nil, nil, nil, false
+		return nil, nil, nil, "", false
 	}
 
-	server, err := s.Users.FindGameServerByRefForNode(r.Context(), node.ID, serverRef)
+	access, err := s.Users.FindAccessibleGameServerByRefForNode(r.Context(), sess.UserID, node, serverRef)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to load game server")
-		return nil, nil, nil, false
+		return nil, nil, nil, "", false
 	}
-	if server == nil {
+	if access == nil {
 		writeError(w, http.StatusNotFound, "Game server not found")
-		return nil, nil, nil, false
+		return nil, nil, nil, "", false
 	}
 
-	return sess, node, server, true
+	return sess, node, &access.GameServer, access.AccessRole, true
 }
 
 func includeStatusRequested(r *http.Request) bool {
@@ -486,13 +497,14 @@ func includeStatusRequested(r *http.Request) bool {
 	}
 }
 
-func buildGameServerPermissions(role string) gameServerPermissions {
+func buildGameServerPermissions(nodeRole, serverRole string) gameServerPermissions {
 	return gameServerPermissions{
-		CanView:        canViewGameServers(role),
-		CanCreate:      canCreateGameServer(role),
-		CanControl:     canControlGameServer(role),
-		CanManageFiles: canManageGameServerFiles(role),
-		CanReadConsole: canReadGameServerConsole(role),
+		CanView:        canViewGameServer(serverRole),
+		CanCreate:      canCreateGameServer(nodeRole),
+		CanControl:     canControlGameServer(serverRole),
+		CanManageFiles: canManageGameServerFiles(serverRole),
+		CanReadConsole: canReadGameServerConsole(serverRole),
+		CanManage:      canManageGameServer(serverRole),
 	}
 }
 
