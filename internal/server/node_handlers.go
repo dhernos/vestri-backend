@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 	"unicode"
@@ -144,6 +145,75 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"node": buildNodeResponse(node),
+	})
+}
+
+func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFromContext(r.Context())
+	if sess == nil {
+		writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	nodeRef := strings.TrimSpace(chi.URLParam(r, "nodeRef"))
+	if nodeRef == "" {
+		writeError(w, http.StatusBadRequest, "nodeRef is required")
+		return
+	}
+
+	node, err := s.Users.FindWorkerNodeForOwnerByRef(r.Context(), sess.UserID, nodeRef)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to load node")
+		return
+	}
+	if node == nil {
+		writeError(w, http.StatusNotFound, "Node not found")
+		return
+	}
+
+	servers, err := s.Users.ListGameServersForNode(r.Context(), node.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to load node servers")
+		return
+	}
+
+	warnings := make([]string, 0)
+	baseURL, apiKey, workerErr := s.workerTargetFromNode(node)
+	if workerErr != nil {
+		warnings = append(warnings, "worker cleanup skipped due invalid node worker configuration")
+	} else {
+		for i := range servers {
+			if err := s.cleanupGameServerOnWorker(r.Context(), baseURL, apiKey, &servers[i]); err != nil {
+				warnings = append(warnings, fmt.Sprintf("server %s cleanup failed", servers[i].Slug))
+			}
+		}
+
+		legacyNodePath := path.Join("nodes", node.Slug)
+		if err := s.workerDeletePath(r.Context(), baseURL, apiKey, legacyNodePath, true); err != nil {
+			warnings = append(warnings, "legacy node directory cleanup failed")
+		}
+	}
+
+	deleted, err := s.Users.DeleteWorkerNodeForOwner(r.Context(), node.ID, sess.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to delete node")
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusNotFound, "Node not found")
+		return
+	}
+
+	if len(warnings) > 0 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"message":  "Node deleted with cleanup warnings.",
+			"warnings": warnings,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "Node deleted.",
 	})
 }
 

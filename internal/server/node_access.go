@@ -67,3 +67,48 @@ func normalizeWorkerPath(path string) string {
 	}
 	return normalized
 }
+
+func canViewGameServers(role string) bool {
+	switch role {
+	case auth.NodeAccessOwner, auth.NodeAccessAdmin, auth.NodeAccessOperator, auth.NodeAccessViewer:
+		return true
+	default:
+		return false
+	}
+}
+
+func canCreateGameServer(role string) bool {
+	switch role {
+	case auth.NodeAccessOwner, auth.NodeAccessAdmin:
+		return true
+	default:
+		return false
+	}
+}
+
+func canControlGameServer(role string) bool {
+	switch role {
+	case auth.NodeAccessOwner, auth.NodeAccessAdmin, auth.NodeAccessOperator:
+		return true
+	default:
+		return false
+	}
+}
+
+func canManageGameServerFiles(role string) bool {
+	switch role {
+	case auth.NodeAccessOwner, auth.NodeAccessAdmin:
+		return true
+	default:
+		return false
+	}
+}
+
+func canReadGameServerConsole(role string) bool {
+	switch role {
+	case auth.NodeAccessOwner, auth.NodeAccessAdmin, auth.NodeAccessOperator:
+		return true
+	default:
+		return false
+	}
+}

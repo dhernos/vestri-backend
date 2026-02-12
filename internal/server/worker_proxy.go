@@ -196,20 +196,29 @@ func (s *Server) workerTargetForUserNode(ctx context.Context, userID, nodeRef st
 		return nil, nil, "", errWorkerNodeNotFound
 	}
 
+	baseURL, apiKey, err := s.workerTargetFromNode(node)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	return node, baseURL, apiKey, nil
+}
+
+func (s *Server) workerTargetFromNode(node *auth.WorkerNode) (*url.URL, string, error) {
 	baseURL, err := url.Parse(node.BaseURL)
 	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
-		return nil, nil, "", errors.New("worker node base URL is invalid")
+		return nil, "", errors.New("worker node base URL is invalid")
 	}
 
 	apiKey, err := s.decryptNodeAPIKey(node)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, "", err
 	}
 	if strings.TrimSpace(apiKey) == "" {
-		return nil, nil, "", errors.New("worker node api key is missing")
+		return nil, "", errors.New("worker node api key is missing")
 	}
 
-	return node, baseURL, apiKey, nil
+	return baseURL, apiKey, nil
 }
 
 func signWorkerRequest(apiKey, ts, nonce, method, path string) string {

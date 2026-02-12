@@ -1,0 +1,24 @@
+{
+  "id": "minecraft-vanilla",
+  "name": "Minecraft Vanilla",
+  "description": "Vanilla Minecraft server powered by itzg/minecraft-server.",
+  "game": "minecraft",
+  "templateVersion": "1",
+  "composeInline": "services:\n  minecraft:\n    image: itzg/minecraft-server:latest\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25565:25565\"\n    environment:\n      EULA: \"TRUE\"\n      TYPE: \"VANILLA\"\n      SERVER_NAME: \"{{SERVER_NAME}}\"\n      MAX_PLAYERS: \"20\"\n    volumes:\n      - ./data:/data\n    restart: unless-stopped\n",
+  "configFiles": [
+    {
+      "id": "server-properties",
+      "title": "server.properties",
+      "path": "data/server.properties",
+      "format": "properties",
+      "defaultContent": "motd={{SERVER_NAME}}\nmax-players=20\nonline-mode=true\n"
+    },
+    {
+      "id": "eula",
+      "title": "eula.txt",
+      "path": "data/eula.txt",
+      "format": "text",
+      "defaultContent": "eula=true\n"
+    }
+  ]
+}

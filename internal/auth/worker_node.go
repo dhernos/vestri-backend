@@ -180,6 +180,18 @@ func (r *UserRepository) WorkerNodeSlugExists(ctx context.Context, slug string) 
 	return true, nil
 }
 
+func (r *UserRepository) DeleteWorkerNodeForOwner(ctx context.Context, nodeID, ownerUserID string) (bool, error) {
+	tag, err := r.DB.Exec(ctx, `
+		DELETE FROM "WorkerNode"
+		WHERE "id"=$1
+		  AND "ownerUserId"=$2
+	`, nodeID, ownerUserID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (r *UserRepository) CreateWorkerNodeInvite(ctx context.Context, nodeID, inviterUserID, email, permission string, expiresAt time.Time) (*WorkerNodeInvite, error) {
 	tx, err := r.DB.Begin(ctx)
 	if err != nil {
