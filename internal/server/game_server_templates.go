@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"path"
 	"sort"
 	"strings"
@@ -23,6 +24,8 @@ type gameServerTemplate struct {
 	ComposeInline   string                         `json:"composeInline,omitempty"`
 	ComposeURL      string                         `json:"composeUrl,omitempty"`
 	ConfigFiles     []gameServerTemplateConfigFile `json:"configFiles"`
+	Agreement       *gameServerTemplateAgreement   `json:"agreement,omitempty"`
+	VersionConfig   *gameServerTemplateVersions    `json:"versionConfig,omitempty"`
 }
 
 type gameServerTemplateConfigFile struct {
@@ -40,10 +43,32 @@ type gameServerConfigFileResponse struct {
 	Format string `json:"format"`
 }
 
+type gameServerTemplateAgreement struct {
+	Required bool   `json:"required"`
+	Title    string `json:"title,omitempty"`
+	Text     string `json:"text,omitempty"`
+	LinkText string `json:"linkText,omitempty"`
+	LinkURL  string `json:"linkUrl,omitempty"`
+}
+
+type gameServerTemplateVersions struct {
+	Software *gameServerTemplateVersionField `json:"software,omitempty"`
+	Game     *gameServerTemplateVersionField `json:"game,omitempty"`
+}
+
+type gameServerTemplateVersionField struct {
+	Label       string   `json:"label,omitempty"`
+	Placeholder string   `json:"placeholder,omitempty"`
+	Default     string   `json:"defaultValue,omitempty"`
+	Options     []string `json:"options,omitempty"`
+}
+
 type gameServerStoredMetadata struct {
-	TemplateName string                         `json:"templateName"`
-	Game         string                         `json:"game"`
-	ConfigFiles  []gameServerTemplateConfigFile `json:"configFiles"`
+	TemplateName    string                         `json:"templateName"`
+	Game            string                         `json:"game"`
+	ConfigFiles     []gameServerTemplateConfigFile `json:"configFiles"`
+	SoftwareVersion string                         `json:"softwareVersion,omitempty"`
+	GameVersion     string                         `json:"gameVersion,omitempty"`
 }
 
 var (
@@ -150,6 +175,18 @@ func normalizeGameServerTemplate(tpl *gameServerTemplate) error {
 		return fmt.Errorf("composeInline or composeUrl is required")
 	}
 
+	agreement, err := normalizeTemplateAgreement(tpl.Agreement)
+	if err != nil {
+		return err
+	}
+	tpl.Agreement = agreement
+
+	versionConfig, err := normalizeTemplateVersions(tpl.VersionConfig)
+	if err != nil {
+		return err
+	}
+	tpl.VersionConfig = versionConfig
+
 	normalizedConfigFiles := make([]gameServerTemplateConfigFile, 0, len(tpl.ConfigFiles))
 	for _, cfg := range tpl.ConfigFiles {
 		cfg.ID = strings.TrimSpace(cfg.ID)
@@ -178,6 +215,121 @@ func normalizeGameServerTemplate(tpl *gameServerTemplate) error {
 
 	tpl.ConfigFiles = normalizedConfigFiles
 	return nil
+}
+
+func normalizeTemplateAgreement(value *gameServerTemplateAgreement) (*gameServerTemplateAgreement, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	normalized := *value
+	normalized.Title = strings.TrimSpace(normalized.Title)
+	normalized.Text = strings.TrimSpace(normalized.Text)
+	normalized.LinkText = strings.TrimSpace(normalized.LinkText)
+	normalized.LinkURL = strings.TrimSpace(normalized.LinkURL)
+
+	if !normalized.Required && normalized.Title == "" && normalized.Text == "" && normalized.LinkURL == "" {
+		return nil, nil
+	}
+	if normalized.Required && normalized.Text == "" {
+		return nil, fmt.Errorf("agreement text is required when agreement is required")
+	}
+	if normalized.Required && normalized.Title == "" {
+		normalized.Title = "Important notice"
+	}
+	if normalized.LinkURL != "" {
+		if _, err := url.ParseRequestURI(normalized.LinkURL); err != nil {
+			return nil, fmt.Errorf("invalid agreement linkUrl")
+		}
+		linkURL, err := url.Parse(normalized.LinkURL)
+		if err != nil || (linkURL.Scheme != "http" && linkURL.Scheme != "https") {
+			return nil, fmt.Errorf("agreement linkUrl must use http or https")
+		}
+		if normalized.LinkText == "" {
+			normalized.LinkText = normalized.LinkURL
+		}
+	}
+
+	return &normalized, nil
+}
+
+func normalizeTemplateVersions(value *gameServerTemplateVersions) (*gameServerTemplateVersions, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	software, err := normalizeTemplateVersionField(value.Software, "Server type")
+	if err != nil {
+		return nil, err
+	}
+	game, err := normalizeTemplateVersionField(value.Game, "Game version")
+	if err != nil {
+		return nil, err
+	}
+
+	if software == nil && game == nil {
+		return nil, nil
+	}
+
+	return &gameServerTemplateVersions{
+		Software: software,
+		Game:     game,
+	}, nil
+}
+
+func normalizeTemplateVersionField(value *gameServerTemplateVersionField, fallbackLabel string) (*gameServerTemplateVersionField, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	hasAnyValue := strings.TrimSpace(value.Label) != "" ||
+		strings.TrimSpace(value.Placeholder) != "" ||
+		strings.TrimSpace(value.Default) != "" ||
+		len(value.Options) > 0
+	if !hasAnyValue {
+		return nil, nil
+	}
+
+	normalized := *value
+	normalized.Label = strings.TrimSpace(normalized.Label)
+	normalized.Placeholder = strings.TrimSpace(normalized.Placeholder)
+	normalized.Default = strings.TrimSpace(normalized.Default)
+
+	seen := make(map[string]struct{}, len(normalized.Options))
+	options := make([]string, 0, len(normalized.Options))
+	for _, option := range normalized.Options {
+		cleaned := strings.TrimSpace(option)
+		if cleaned == "" {
+			continue
+		}
+		if _, exists := seen[cleaned]; exists {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		options = append(options, cleaned)
+	}
+	normalized.Options = options
+
+	if normalized.Label == "" {
+		normalized.Label = fallbackLabel
+	}
+	if normalized.Default == "" && len(normalized.Options) > 0 {
+		normalized.Default = normalized.Options[0]
+	}
+	if len(normalized.Options) > 0 && normalized.Default != "" {
+		found := false
+		for _, option := range normalized.Options {
+			if option == normalized.Default {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("default value %q for %s is not in options", normalized.Default, normalized.Label)
+		}
+	}
+
+	return &normalized, nil
 }
 
 func normalizeTemplatePath(value string) string {

@@ -24,9 +24,11 @@ const (
 )
 
 type createGameServerRequest struct {
-	TemplateID string `json:"templateId"`
-	Name       string `json:"name"`
-	Slug       string `json:"slug"`
+	TemplateID        string `json:"templateId"`
+	Name              string `json:"name"`
+	AgreementAccepted bool   `json:"agreementAccepted"`
+	SoftwareVersion   string `json:"softwareVersion"`
+	GameVersion       string `json:"gameVersion"`
 }
 
 type gameServerTemplateResponse struct {
@@ -36,6 +38,8 @@ type gameServerTemplateResponse struct {
 	Game            string                         `json:"game"`
 	TemplateVersion string                         `json:"templateVersion"`
 	ConfigFiles     []gameServerConfigFileResponse `json:"configFiles"`
+	Agreement       *gameServerTemplateAgreement   `json:"agreement,omitempty"`
+	VersionConfig   *gameServerTemplateVersions    `json:"versionConfig,omitempty"`
 }
 
 type gameServerPermissions struct {
@@ -56,6 +60,8 @@ type gameServerResponse struct {
 	TemplateVersion string                         `json:"templateVersion"`
 	TemplateName    string                         `json:"templateName"`
 	Game            string                         `json:"game"`
+	SoftwareVersion string                         `json:"softwareVersion,omitempty"`
+	GameVersion     string                         `json:"gameVersion,omitempty"`
 	StackName       string                         `json:"stackName"`
 	RootPath        string                         `json:"rootPath"`
 	ComposePath     string                         `json:"composePath"`
@@ -90,6 +96,8 @@ func (s *Server) handleListGameServerTemplates(w http.ResponseWriter, r *http.Re
 			Game:            tpl.Game,
 			TemplateVersion: tpl.TemplateVersion,
 			ConfigFiles:     configFilesToResponse(tpl.ConfigFiles),
+			Agreement:       tpl.Agreement,
+			VersionConfig:   tpl.VersionConfig,
 		})
 	}
 
@@ -195,10 +203,23 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		name = template.Name
 	}
 
-	slugBase := slugify(strings.TrimSpace(req.Slug))
-	if slugBase == "" {
-		slugBase = slugify(name)
+	if template.Agreement != nil && template.Agreement.Required && !req.AgreementAccepted {
+		writeError(w, http.StatusBadRequest, "Template agreement must be accepted before creating this server")
+		return
 	}
+
+	softwareVersion, err := resolveTemplateVersionValue(template.VersionConfig, "software", req.SoftwareVersion)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	gameVersion, err := resolveTemplateVersionValue(template.VersionConfig, "game", req.GameVersion)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	slugBase := slugify(name)
 	if slugBase == "" {
 		slugBase = slugify(template.ID)
 	}
@@ -217,8 +238,11 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	composePath := path.Join(rootPath, "docker-compose.yml")
 
 	renderValues := map[string]string{
-		"SERVER_SLUG": slug,
-		"SERVER_NAME": name,
+		"SERVER_SLUG":     slug,
+		"SERVER_NAME":     name,
+		"SERVER_SOFTWARE": softwareVersion,
+		"SERVER_TYPE":     softwareVersion,
+		"GAME_VERSION":    gameVersion,
 	}
 
 	composeContent, err := resolveTemplateCompose(r.Context(), template, renderValues)
@@ -254,9 +278,11 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	metadataRaw, _ := json.Marshal(gameServerStoredMetadata{
-		TemplateName: template.Name,
-		Game:         template.Game,
-		ConfigFiles:  configFiles,
+		TemplateName:    template.Name,
+		Game:            template.Game,
+		ConfigFiles:     configFiles,
+		SoftwareVersion: softwareVersion,
+		GameVersion:     gameVersion,
 	})
 
 	created, err := s.Users.CreateGameServer(r.Context(), auth.CreateGameServerParams{
@@ -525,6 +551,8 @@ func buildGameServerResponse(srv *auth.GameServer, permissions gameServerPermiss
 		TemplateVersion: srv.TemplateVersion,
 		TemplateName:    metadata.TemplateName,
 		Game:            metadata.Game,
+		SoftwareVersion: metadata.SoftwareVersion,
+		GameVersion:     metadata.GameVersion,
 		StackName:       srv.StackName,
 		RootPath:        srv.RootPath,
 		ComposePath:     srv.ComposePath,
@@ -537,6 +565,43 @@ func buildGameServerResponse(srv *auth.GameServer, permissions gameServerPermiss
 		CreatedAt:       srv.CreatedAt,
 		UpdatedAt:       srv.UpdatedAt,
 	}
+}
+
+func resolveTemplateVersionValue(config *gameServerTemplateVersions, field, raw string) (string, error) {
+	if config == nil {
+		return "", nil
+	}
+
+	var cfg *gameServerTemplateVersionField
+	switch strings.ToLower(strings.TrimSpace(field)) {
+	case "software":
+		cfg = config.Software
+	case "game":
+		cfg = config.Game
+	default:
+		return "", fmt.Errorf("unsupported version field")
+	}
+
+	if cfg == nil {
+		return "", nil
+	}
+
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		value = strings.TrimSpace(cfg.Default)
+	}
+	if value == "" && len(cfg.Options) > 0 {
+		value = cfg.Options[0]
+	}
+	if len(cfg.Options) == 0 {
+		return value, nil
+	}
+	for _, option := range cfg.Options {
+		if strings.EqualFold(value, option) {
+			return option, nil
+		}
+	}
+	return "", fmt.Errorf("invalid value for %s", cfg.Label)
 }
 
 func (s *Server) uniqueGameServerSlug(ctx context.Context, nodeID, base string) (string, error) {

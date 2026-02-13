@@ -4,7 +4,26 @@
   "description": "Vanilla Minecraft server powered by itzg/minecraft-server.",
   "game": "minecraft",
   "templateVersion": "1",
-  "composeInline": "services:\n  minecraft:\n    image: itzg/minecraft-server:latest\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25565:25565\"\n    environment:\n      EULA: \"TRUE\"\n      TYPE: \"VANILLA\"\n      SERVER_NAME: \"{{SERVER_NAME}}\"\n      MAX_PLAYERS: \"20\"\n    volumes:\n      - ./data:/data\n    restart: unless-stopped\n",
+  "agreement": {
+    "required": true,
+    "title": "Minecraft EULA",
+    "text": "You must accept the Minecraft End User License Agreement before creating this server.",
+    "linkText": "Read the Minecraft EULA",
+    "linkUrl": "https://aka.ms/MinecraftEULA"
+  },
+  "versionConfig": {
+    "software": {
+      "label": "Server software",
+      "defaultValue": "VANILLA",
+      "options": ["VANILLA", "PAPER", "SPIGOT", "PURPUR"]
+    },
+    "game": {
+      "label": "Game version",
+      "defaultValue": "LATEST",
+      "placeholder": "e.g. 1.21.4"
+    }
+  },
+  "composeInline": "services:\n  minecraft:\n    image: itzg/minecraft-server:latest\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25565:25565\"\n    environment:\n      EULA: \"TRUE\"\n      TYPE: \"{{SERVER_SOFTWARE}}\"\n      VERSION: \"{{GAME_VERSION}}\"\n      SERVER_NAME: \"{{SERVER_NAME}}\"\n      MAX_PLAYERS: \"20\"\n    volumes:\n      - ./data:/data\n    restart: unless-stopped\n",
   "configFiles": [
     {
       "id": "server-properties",

@@ -16,7 +16,16 @@ func LocaleFromRequest(r *http.Request) string {
 	if r == nil {
 		return DefaultLocale
 	}
-	return NormalizeLocale(r.Header.Get("Accept-Language"))
+
+	// Email locale defaults to English unless the client explicitly sets a locale header.
+	if explicit := strings.TrimSpace(r.Header.Get("X-App-Locale")); explicit != "" {
+		return NormalizeLocale(explicit)
+	}
+	if explicit := strings.TrimSpace(r.Header.Get("X-Locale")); explicit != "" {
+		return NormalizeLocale(explicit)
+	}
+
+	return DefaultLocale
 }
 
 func NormalizeLocale(header string) string {
