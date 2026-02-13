@@ -35,3 +35,6 @@ Environment variables:
 - `DATABASE_URL` (required)
 - `AUTO_MIGRATE` (optional, default `true`)
 - `MIGRATIONS_DIR` (optional, default `./migrations`)
+- `LOG_FILE` (optional, default `logs/server.log`)
+- `LOG_MAX_SIZE_MB` (optional, default `20`)
+- `LOG_MAX_BACKUPS` (optional, default `3`)

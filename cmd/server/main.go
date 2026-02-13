@@ -14,6 +14,7 @@ import (
 	"yourapp/internal/config"
 	"yourapp/internal/database"
 	"yourapp/internal/email"
+	applog "yourapp/internal/logging"
 	redisx "yourapp/internal/redis"
 	"yourapp/internal/server"
 )
@@ -25,16 +26,30 @@ func main() {
 	}
 
 	logOutput := io.Writer(os.Stdout)
+	var logFileCloser io.Closer
 	if cfg.LogFile != "" {
 		if err := os.MkdirAll(filepath.Dir(cfg.LogFile), 0o755); err != nil {
 			log.Fatalf("log setup error: %v", err)
 		}
-		f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+
+		maxSizeMB := cfg.LogMaxSizeMB
+		if maxSizeMB <= 0 {
+			maxSizeMB = 20
+		}
+		maxBackups := cfg.LogMaxBackups
+		if maxBackups < 0 {
+			maxBackups = 0
+		}
+
+		f, err := applog.NewRotatingFileWriter(cfg.LogFile, int64(maxSizeMB)*1024*1024, maxBackups)
 		if err != nil {
 			log.Fatalf("log file open error: %v", err)
 		}
-		defer f.Close()
+		logFileCloser = f
 		logOutput = io.MultiWriter(os.Stdout, f)
+	}
+	if logFileCloser != nil {
+		defer logFileCloser.Close()
 	}
 	log.SetOutput(logOutput)
 	log.SetFlags(log.LstdFlags | log.LUTC | log.Lshortfile)

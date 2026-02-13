@@ -62,6 +62,8 @@ var endpointAccess = []AccessRule{
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodDelete, Path: "/api/nodes/{nodeRef}/servers/{serverRef}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/status", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/logs/stream", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/exec/ws", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/start", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/stop", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/files/list", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},

@@ -126,6 +126,8 @@ func (s *Server) Router() http.Handler {
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}", s.handleGetGameServer)
 		pr.With(s.requireRoles(accessRoles(http.MethodDelete, "/api/nodes/{nodeRef}/servers/{serverRef}"))).Delete("/api/nodes/{nodeRef}/servers/{serverRef}", s.handleDeleteGameServer)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/status"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/status", s.handleGameServerStatus)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/console/logs/stream"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/console/logs/stream", s.handleGameServerConsoleLogsStream)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/console/exec/ws"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/console/exec/ws", s.handleGameServerConsoleExecWS)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/start"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/start", s.handleStartGameServer)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/stop"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/stop", s.handleStopGameServer)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/files/list"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/files/list", s.handleListGameServerFiles)

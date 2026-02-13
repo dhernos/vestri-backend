@@ -1,0 +1,31 @@
+{
+  "id": "satisfactory-dedicated",
+  "name": "Satisfactory Dedicated Server",
+  "description": "Dedicated Satisfactory server powered by wolveix/satisfactory-server.",
+  "game": "satisfactory",
+  "templateVersion": "1",
+  "agreement": {
+    "required": true,
+    "title": "Satisfactory EULA",
+    "text": "You must accept the Satisfactory EULA before creating this server.",
+    "linkText": "Open Satisfactory legal page",
+    "linkUrl": "https://www.satisfactorygame.com/"
+  },
+  "versionConfig": {
+    "software": {
+      "label": "Release channel",
+      "defaultValue": "public",
+      "options": ["public", "experimental"]
+    }
+  },
+  "composeInline": "services:\n  satisfactory:\n    image: wolveix/satisfactory-server:latest\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"7777:7777/udp\"\n      - \"15000:15000/udp\"\n      - \"15777:15777/udp\"\n    environment:\n      SERVER_NAME: \"{{SERVER_NAME}}\"\n      STEAMBETA: \"{{SERVER_SOFTWARE}}\"\n      MAXPLAYERS: \"8\"\n    volumes:\n      - ./data:/config\n    stdin_open: true\n    tty: true\n    restart: unless-stopped\n",
+  "configFiles": [
+    {
+      "id": "server-settings",
+      "title": "ServerSettings.ini",
+      "path": "data/FactoryGame/Saved/Config/LinuxServer/ServerSettings.ini",
+      "format": "ini",
+      "defaultContent": "[/Script/FactoryGame.FGServerSettings]\nServerName={{SERVER_NAME}}\n"
+    }
+  ]
+}
