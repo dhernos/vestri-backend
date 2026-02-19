@@ -1,0 +1,24 @@
+{
+  "id": "minecraft-velocity",
+  "name": "Minecraft Velocity Proxy",
+  "description": "Velocity proxy server powered by itzg/bungeecord.",
+  "game": "minecraft",
+  "templateVersion": "1",
+  "composeInline": "services:\n  velocity:\n    image: itzg/bungeecord:latest\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25577:25577\"\n    environment:\n      TYPE: \"VELOCITY\"\n    volumes:\n      - ./data:/server\n    stdin_open: true\n    tty: true\n    restart: unless-stopped\n    networks:\n      - velocity\nnetworks:\n  velocity:\n    name: \"{{VELOCITY_NETWORK}}\"\n",
+  "configFiles": [
+    {
+      "id": "velocity-config",
+      "title": "velocity.toml",
+      "path": "data/velocity.toml",
+      "format": "toml",
+      "defaultContent": "bind = \"0.0.0.0:25577\"\nmotd = \"A Vestri Velocity Proxy\"\nshow-max-players = 500\nonline-mode = true\nplayer-info-forwarding-mode = \"modern\"\nservers = {}\ntry = []\n"
+    },
+    {
+      "id": "velocity-forwarding-secret",
+      "title": "forwarding.secret",
+      "path": "data/forwarding.secret",
+      "format": "text",
+      "defaultContent": "{{VELOCITY_FORWARDING_SECRET}}\n"
+    }
+  ]
+}

@@ -72,6 +72,7 @@ var readableTextExtensions = map[string]struct{}{
 	".rb":         {},
 	".rs":         {},
 	".scss":       {},
+	".secret":     {},
 	".sh":         {},
 	".sql":        {},
 	".svg":        {},
