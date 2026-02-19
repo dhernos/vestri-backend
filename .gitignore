@@ -45,3 +45,5 @@ logs/server.log
 next-env.d.ts
 
 certificates
+
+.gocache/

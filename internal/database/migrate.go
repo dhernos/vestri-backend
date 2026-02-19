@@ -133,6 +133,14 @@ func migrationChecksum(ctx context.Context, db *pgxpool.Pool, version string) (c
 }
 
 func checksumHex(raw []byte) string {
-	sum := sha256.Sum256(raw)
+	normalized := normalizeLineEndings(raw)
+	sum := sha256.Sum256(normalized)
 	return hex.EncodeToString(sum[:])
 }
+
+func normalizeLineEndings(b []byte) []byte {
+	s := strings.ReplaceAll(string(b), "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return []byte(s)
+}
+
