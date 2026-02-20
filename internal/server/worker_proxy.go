@@ -70,6 +70,10 @@ func (s *Server) handleWorkerProxy(w http.ResponseWriter, r *http.Request) {
 	if normalizedWorkerPath == "/" {
 		normalizedWorkerPath = "/"
 	}
+	if normalizedWorkerPath == "/fs/fetch" {
+		writeError(w, http.StatusForbidden, "This worker route is not available via user proxy")
+		return
+	}
 	allowHealthForMembers := r.Method == http.MethodGet && normalizedWorkerPath == "/health"
 	if !canUseNodeWorkerProxy(node.AccessRole) && !allowHealthForMembers {
 		writeError(w, http.StatusForbidden, "Only node owners can call generic worker proxy routes")

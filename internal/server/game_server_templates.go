@@ -61,6 +61,8 @@ type gameServerTemplateVersionField struct {
 	Placeholder string   `json:"placeholder,omitempty"`
 	Default     string   `json:"defaultValue,omitempty"`
 	Options     []string `json:"options,omitempty"`
+	// OptionsBySoftware allows game version dropdowns to depend on the selected server software.
+	OptionsBySoftware map[string][]string `json:"optionsBySoftware,omitempty"`
 }
 
 type gameServerStoredMetadata struct {
@@ -290,7 +292,8 @@ func normalizeTemplateVersionField(value *gameServerTemplateVersionField, fallba
 	hasAnyValue := strings.TrimSpace(value.Label) != "" ||
 		strings.TrimSpace(value.Placeholder) != "" ||
 		strings.TrimSpace(value.Default) != "" ||
-		len(value.Options) > 0
+		len(value.Options) > 0 ||
+		len(value.OptionsBySoftware) > 0
 	if !hasAnyValue {
 		return nil, nil
 	}
@@ -299,21 +302,8 @@ func normalizeTemplateVersionField(value *gameServerTemplateVersionField, fallba
 	normalized.Label = strings.TrimSpace(normalized.Label)
 	normalized.Placeholder = strings.TrimSpace(normalized.Placeholder)
 	normalized.Default = strings.TrimSpace(normalized.Default)
-
-	seen := make(map[string]struct{}, len(normalized.Options))
-	options := make([]string, 0, len(normalized.Options))
-	for _, option := range normalized.Options {
-		cleaned := strings.TrimSpace(option)
-		if cleaned == "" {
-			continue
-		}
-		if _, exists := seen[cleaned]; exists {
-			continue
-		}
-		seen[cleaned] = struct{}{}
-		options = append(options, cleaned)
-	}
-	normalized.Options = options
+	normalized.Options = normalizeTemplateVersionOptions(normalized.Options)
+	normalized.OptionsBySoftware = normalizeTemplateVersionOptionsBySoftware(normalized.OptionsBySoftware)
 
 	if normalized.Label == "" {
 		normalized.Label = fallbackLabel
@@ -335,6 +325,46 @@ func normalizeTemplateVersionField(value *gameServerTemplateVersionField, fallba
 	}
 
 	return &normalized, nil
+}
+
+func normalizeTemplateVersionOptions(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	options := make([]string, 0, len(values))
+	for _, option := range values {
+		cleaned := strings.TrimSpace(option)
+		if cleaned == "" {
+			continue
+		}
+		if _, exists := seen[cleaned]; exists {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		options = append(options, cleaned)
+	}
+	return options
+}
+
+func normalizeTemplateVersionOptionsBySoftware(values map[string][]string) map[string][]string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	result := make(map[string][]string, len(values))
+	for software, options := range values {
+		key := strings.ToUpper(strings.TrimSpace(software))
+		if key == "" {
+			continue
+		}
+		cleaned := normalizeTemplateVersionOptions(options)
+		if len(cleaned) == 0 {
+			continue
+		}
+		result[key] = cleaned
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func normalizeTemplatePath(value string) string {

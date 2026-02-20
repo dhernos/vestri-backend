@@ -112,15 +112,19 @@ func (s *Server) handleListGameServerTemplates(w http.ResponseWriter, r *http.Re
 
 	resp := make([]gameServerTemplateResponse, 0, len(templates))
 	for _, tpl := range templates {
+		enrichedTemplate := tpl
+		enrichedTemplate.VersionConfig = cloneTemplateVersions(tpl.VersionConfig)
+		s.enrichTemplateVersionConfig(r.Context(), &enrichedTemplate)
+
 		resp = append(resp, gameServerTemplateResponse{
-			ID:              tpl.ID,
-			Name:            tpl.Name,
-			Description:     tpl.Description,
-			Game:            tpl.Game,
-			TemplateVersion: tpl.TemplateVersion,
-			ConfigFiles:     configFilesToResponse(tpl.ConfigFiles),
-			Agreement:       tpl.Agreement,
-			VersionConfig:   tpl.VersionConfig,
+			ID:              enrichedTemplate.ID,
+			Name:            enrichedTemplate.Name,
+			Description:     enrichedTemplate.Description,
+			Game:            enrichedTemplate.Game,
+			TemplateVersion: enrichedTemplate.TemplateVersion,
+			ConfigFiles:     configFilesToResponse(enrichedTemplate.ConfigFiles),
+			Agreement:       enrichedTemplate.Agreement,
+			VersionConfig:   enrichedTemplate.VersionConfig,
 		})
 	}
 
@@ -253,21 +257,33 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "Game server template not found")
 		return
 	}
+	template.VersionConfig = cloneTemplateVersions(template.VersionConfig)
+	s.enrichTemplateVersionConfig(r.Context(), template)
 
 	if template.Agreement != nil && template.Agreement.Required && !req.AgreementAccepted {
 		writeError(w, http.StatusBadRequest, "Template agreement must be accepted before creating this server")
 		return
 	}
 
-	softwareVersion, err := resolveTemplateVersionValue(template.VersionConfig, "software", req.SoftwareVersion)
+	softwareVersion, err := resolveTemplateVersionValue(template.VersionConfig, "software", req.SoftwareVersion, "")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	gameVersion, err := resolveTemplateVersionValue(template.VersionConfig, "game", req.GameVersion)
+	gameVersion, err := resolveTemplateVersionValue(template.VersionConfig, "game", req.GameVersion, softwareVersion)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	var minecraftArtifact *minecraftServerArtifact
+	if shouldProvisionMinecraftServerArtifact(template) {
+		minecraftArtifact, err = resolveMinecraftServerArtifact(r.Context(), softwareVersion, gameVersion)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Failed to resolve selected Minecraft build")
+			return
+		}
+		gameVersion = minecraftArtifact.Version
 	}
 
 	var parentServer *auth.GameServer
@@ -315,13 +331,21 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	stackName := slug
 	rootPath := slug
 	composePath := path.Join(rootPath, "docker-compose.yml")
+	minecraftServerJarName := defaultMinecraftServerJarFile
+	if minecraftArtifact != nil {
+		minecraftServerJarName = minecraftServerJarFileNameForArtifact(minecraftArtifact)
+	}
 
 	renderValues := map[string]string{
-		"SERVER_SLUG":     slug,
-		"SERVER_NAME":     name,
-		"SERVER_SOFTWARE": softwareVersion,
-		"SERVER_TYPE":     softwareVersion,
-		"GAME_VERSION":    gameVersion,
+		"SERVER_SLUG":                 slug,
+		"SERVER_NAME":                 name,
+		"SERVER_SOFTWARE":             softwareVersion,
+		"SERVER_TYPE":                 softwareVersion,
+		"GAME_VERSION":                gameVersion,
+		"MINECRAFT_RUNTIME_IMAGE":     defaultMinecraftRuntimeImage,
+		"MINECRAFT_SERVER_JAR_NAME":   minecraftServerJarName,
+		"MINECRAFT_JAVA_ARGS":         defaultMinecraftJavaArgs,
+		"MINECRAFT_SERVER_START_ARGS": defaultMinecraftServerStartArgs,
 	}
 
 	metadata := gameServerStoredMetadata{
@@ -408,6 +432,13 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		renderedContent := normalizeTemplateTextEscapes(renderTemplateText(cfg.DefaultContent, renderValues))
 		if err := s.workerWriteFile(r.Context(), baseURL, apiKey, absoluteConfigPath, renderedContent); err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to write default config files on worker")
+			return
+		}
+	}
+
+	if minecraftArtifact != nil {
+		if err := s.provisionMinecraftServerArtifactOnWorker(r.Context(), baseURL, apiKey, rootPath, minecraftArtifact); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to download Minecraft server jar")
 			return
 		}
 	}
@@ -836,16 +867,15 @@ func buildVelocityBackendCompose(template *gameServerTemplate, values map[string
 	}
 	const composeInline = `services:
   minecraft:
-    image: itzg/minecraft-server:latest
+    image: {{MINECRAFT_RUNTIME_IMAGE}}
     container_name: {{VELOCITY_BACKEND_HOST}}
     environment:
-      EULA: "TRUE"
-      TYPE: "{{SERVER_SOFTWARE}}"
-      VERSION: "{{GAME_VERSION}}"
-      SERVER_NAME: "{{SERVER_NAME}}"
-      MAX_PLAYERS: "20"
+      JAVA_ARGS: "{{MINECRAFT_JAVA_ARGS}}"
+      SERVER_DIR: "/server"
+      SERVER_JAR_NAME: "{{MINECRAFT_SERVER_JAR_NAME}}"
+      SERVER_ARGS: "{{MINECRAFT_SERVER_START_ARGS}}"
     volumes:
-      - ./data:/data
+      - ./data:/server
     stdin_open: true
     tty: true
     restart: unless-stopped
@@ -1485,12 +1515,13 @@ func ensureTextEndsWithNewline(value string) string {
 	return value + "\n"
 }
 
-func resolveTemplateVersionValue(config *gameServerTemplateVersions, field, raw string) (string, error) {
+func resolveTemplateVersionValue(config *gameServerTemplateVersions, field, raw, selectedSoftware string) (string, error) {
 	if config == nil {
 		return "", nil
 	}
 
 	var cfg *gameServerTemplateVersionField
+	normalizedField := strings.ToLower(strings.TrimSpace(field))
 	switch strings.ToLower(strings.TrimSpace(field)) {
 	case "software":
 		cfg = config.Software
@@ -1504,17 +1535,33 @@ func resolveTemplateVersionValue(config *gameServerTemplateVersions, field, raw 
 		return "", nil
 	}
 
+	options := cfg.Options
+	if normalizedField == "game" && len(cfg.OptionsBySoftware) > 0 {
+		softwareKey := normalizeMinecraftSoftware(selectedSoftware)
+		if softwareKey == "" {
+			softwareKey = strings.ToUpper(strings.TrimSpace(selectedSoftware))
+		}
+		if softwareKey != "" {
+			if softwareOptions, exists := cfg.OptionsBySoftware[softwareKey]; exists && len(softwareOptions) > 0 {
+				options = softwareOptions
+			}
+		}
+	}
+
 	value := strings.TrimSpace(raw)
 	if value == "" {
 		value = strings.TrimSpace(cfg.Default)
 	}
-	if value == "" && len(cfg.Options) > 0 {
-		value = cfg.Options[0]
+	if value == "" && len(options) > 0 {
+		value = options[0]
 	}
-	if len(cfg.Options) == 0 {
+	if len(options) == 0 {
 		return value, nil
 	}
-	for _, option := range cfg.Options {
+	if strings.EqualFold(value, "LATEST") {
+		return options[0], nil
+	}
+	for _, option := range options {
 		if strings.EqualFold(value, option) {
 			return option, nil
 		}

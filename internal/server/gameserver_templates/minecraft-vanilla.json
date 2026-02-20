@@ -1,7 +1,7 @@
 {
   "id": "minecraft-vanilla",
   "name": "Minecraft Vanilla",
-  "description": "Vanilla Minecraft server powered by itzg/minecraft-server.",
+  "description": "Minecraft server with host-mounted files and runtime-downloaded server jars.",
   "game": "minecraft",
   "templateVersion": "1",
   "agreement": {
@@ -15,7 +15,7 @@
     "software": {
       "label": "Server software",
       "defaultValue": "VANILLA",
-      "options": ["VANILLA", "PAPER", "SPIGOT", "PURPUR"]
+      "options": ["VANILLA", "PAPER", "PURPUR"]
     },
     "game": {
       "label": "Game version",
@@ -23,7 +23,7 @@
       "placeholder": "e.g. 1.21.4"
     }
   },
-  "composeInline": "services:\n  minecraft:\n    image: itzg/minecraft-server:latest\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25565:25565\"\n    environment:\n      EULA: \"TRUE\"\n      TYPE: \"{{SERVER_SOFTWARE}}\"\n      VERSION: \"{{GAME_VERSION}}\"\n      SERVER_NAME: \"{{SERVER_NAME}}\"\n      MAX_PLAYERS: \"20\"\n    volumes:\n      - ./data:/data\n    stdin_open: true\n    tty: true\n    restart: unless-stopped\n",
+  "composeInline": "services:\n  minecraft:\n    image: {{MINECRAFT_RUNTIME_IMAGE}}\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25565:25565\"\n    environment:\n      JAVA_ARGS: \"{{MINECRAFT_JAVA_ARGS}}\"\n      SERVER_DIR: \"/server\"\n      SERVER_JAR_NAME: \"{{MINECRAFT_SERVER_JAR_NAME}}\"\n      SERVER_ARGS: \"{{MINECRAFT_SERVER_START_ARGS}}\"\n    volumes:\n      - ./data:/server\n    stdin_open: true\n    tty: true\n    restart: unless-stopped\n",
   "configFiles": [
     {
       "id": "server-properties",
