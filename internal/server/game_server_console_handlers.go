@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -28,14 +29,27 @@ func (s *Server) handleGameServerConsoleLogsStream(w http.ResponseWriter, r *htt
 		return
 	}
 
-	workerPath := buildWorkerConsolePath("/stack/logs/stream", server.StackName, r.URL.Query().Get("service"))
+	logOptions, err := parseConsoleLogsQuery(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	workerPath := buildWorkerConsolePath(
+		"/stack/logs/stream",
+		server.StackName,
+		r.URL.Query().Get("service"),
+		logOptions,
+	)
 	log.Printf(
-		"game server console logs stream start user=%s node=%s server=%s stack=%s service=%q",
+		"game server console logs stream start user=%s node=%s server=%s stack=%s service=%q follow=%q tail=%q",
 		sess.UserID,
 		node.Slug,
 		server.Slug,
 		server.StackName,
 		strings.TrimSpace(r.URL.Query().Get("service")),
+		logOptions.Get("follow"),
+		logOptions.Get("tail"),
 	)
 	s.proxySignedWorkerGET(w, r, baseURL, apiKey, workerPath, false)
 }
@@ -60,7 +74,12 @@ func (s *Server) handleGameServerConsoleExecWS(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	workerPath := buildWorkerConsolePath("/stack/exec/ws", server.StackName, r.URL.Query().Get("service"))
+	workerPath := buildWorkerConsolePath(
+		"/stack/exec/ws",
+		server.StackName,
+		r.URL.Query().Get("service"),
+		nil,
+	)
 	log.Printf(
 		"game server console exec ws start user=%s node=%s server=%s stack=%s service=%q",
 		sess.UserID,
@@ -72,13 +91,45 @@ func (s *Server) handleGameServerConsoleExecWS(w http.ResponseWriter, r *http.Re
 	s.proxySignedWorkerGET(w, r, baseURL, apiKey, workerPath, true)
 }
 
-func buildWorkerConsolePath(pathname, stackName, service string) string {
+func buildWorkerConsolePath(pathname, stackName, service string, extraQuery url.Values) string {
 	values := url.Values{}
 	values.Set("stack", stackName)
 	if svc := strings.TrimSpace(service); svc != "" {
 		values.Set("service", svc)
 	}
+	for key, entries := range extraQuery {
+		if len(entries) == 0 {
+			continue
+		}
+		values.Set(key, entries[len(entries)-1])
+	}
 	return pathname + "?" + values.Encode()
+}
+
+func parseConsoleLogsQuery(query url.Values) (url.Values, error) {
+	values := url.Values{}
+
+	if raw := strings.TrimSpace(query.Get("follow")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid follow value")
+		}
+		values.Set("follow", strconv.FormatBool(parsed))
+	}
+
+	if raw := strings.TrimSpace(query.Get("tail")); raw != "" {
+		if strings.EqualFold(raw, "all") {
+			values.Set("tail", "all")
+			return values, nil
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			return nil, fmt.Errorf("invalid tail value")
+		}
+		values.Set("tail", strconv.Itoa(parsed))
+	}
+
+	return values, nil
 }
 
 func (s *Server) proxySignedWorkerGET(w http.ResponseWriter, r *http.Request, baseURL *url.URL, apiKey, workerPath string, requireUpgrade bool) {
