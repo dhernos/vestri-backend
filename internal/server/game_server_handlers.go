@@ -28,6 +28,10 @@ const (
 	vanillaTemplateID      = "minecraft-vanilla"
 	defaultVelocityPort    = 25577
 	defaultMinecraftPort   = 25565
+	minecraftEULAConfigID  = "eula"
+	minecraftEULAFilePath  = "data/eula.txt"
+	minecraftEULAFileTitle = "eula.txt"
+	minecraftEULAContent   = "eula=true\n"
 
 	gameServerKindStandalone      = "standalone"
 	gameServerKindVelocity        = "velocity"
@@ -276,14 +280,33 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	shouldProvisionMinecraftArtifact := shouldProvisionMinecraftServerArtifact(template)
 	var minecraftArtifact *minecraftServerArtifact
-	if shouldProvisionMinecraftServerArtifact(template) {
+	if shouldProvisionMinecraftArtifact {
+		normalizedSoftware := normalizeMinecraftSoftware(softwareVersion)
+		if isVelocityTemplateID(template.ID) {
+			normalizedSoftware = minecraftSoftwareVelocity
+		}
+		if normalizedSoftware == "" {
+			normalizedSoftware = defaultMinecraftSoftwareForTemplate(template)
+		}
+		softwareVersion = normalizedSoftware
+		if strings.TrimSpace(gameVersion) == "" {
+			gameVersion = "LATEST"
+		}
+
 		minecraftArtifact, err = resolveMinecraftServerArtifact(r.Context(), softwareVersion, gameVersion)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "Failed to resolve selected Minecraft build")
 			return
 		}
 		gameVersion = minecraftArtifact.Version
+	}
+
+	composeTemplate, err := resolveMinecraftComposeTemplate(template)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to resolve Minecraft compose template")
+		return
 	}
 
 	var parentServer *auth.GameServer
@@ -332,8 +355,20 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	rootPath := slug
 	composePath := path.Join(rootPath, "docker-compose.yml")
 	minecraftServerJarName := defaultMinecraftServerJarFile
-	if minecraftArtifact != nil {
-		minecraftServerJarName = minecraftServerJarFileNameForArtifact(minecraftArtifact)
+	if shouldProvisionMinecraftArtifact {
+		if minecraftArtifact == nil {
+			writeError(w, http.StatusInternalServerError, "Failed to resolve Minecraft artifact")
+			return
+		}
+		minecraftServerJarName, err = minecraftServerJarFileNameForArtifact(minecraftArtifact)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid Minecraft server jar name")
+			return
+		}
+	}
+	minecraftServerStartArgs := defaultMinecraftServerStartArgs
+	if strings.EqualFold(strings.TrimSpace(softwareVersion), minecraftSoftwareVelocity) {
+		minecraftServerStartArgs = ""
 	}
 
 	renderValues := map[string]string{
@@ -345,7 +380,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		"MINECRAFT_RUNTIME_IMAGE":     defaultMinecraftRuntimeImage,
 		"MINECRAFT_SERVER_JAR_NAME":   minecraftServerJarName,
 		"MINECRAFT_JAVA_ARGS":         defaultMinecraftJavaArgs,
-		"MINECRAFT_SERVER_START_ARGS": defaultMinecraftServerStartArgs,
+		"MINECRAFT_SERVER_START_ARGS": minecraftServerStartArgs,
 	}
 
 	metadata := gameServerStoredMetadata{
@@ -364,6 +399,10 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if strings.EqualFold(strings.TrimSpace(softwareVersion), minecraftSoftwareVelocity) {
+			writeError(w, http.StatusBadRequest, "Velocity software cannot be used for backend servers")
+			return
+		}
 
 		parentMetadata := parseGameServerMetadata(parentServer.Metadata)
 		velocityNetwork := strings.TrimSpace(parentMetadata.VelocityNetwork)
@@ -375,7 +414,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		renderValues["VELOCITY_NETWORK"] = velocityNetwork
 		renderValues["VELOCITY_BACKEND_HOST"] = connectHost
 
-		composeContent, err = buildVelocityBackendCompose(template, renderValues)
+		composeContent, err = buildVelocityBackendCompose(r.Context(), composeTemplate, renderValues)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -403,7 +442,11 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			metadata.ConnectPort = defaultVelocityPort
 		}
 
-		composeContent, err = resolveTemplateCompose(r.Context(), template, renderValues)
+		if isVelocityTemplateID(template.ID) {
+			composeContent, err = buildVelocityStandaloneCompose(r.Context(), composeTemplate, renderValues)
+		} else {
+			composeContent, err = resolveTemplateCompose(r.Context(), composeTemplate, renderValues)
+		}
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to load compose file from template")
 			return
@@ -422,9 +465,12 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	configFiles := make([]gameServerTemplateConfigFile, 0, len(template.ConfigFiles))
-	for _, cfg := range template.ConfigFiles {
-		configFiles = append(configFiles, cfg)
+	configFiles = append(configFiles, template.ConfigFiles...)
+	if shouldProvisionMinecraftArtifact {
+		configFiles = ensureMinecraftRequiredConfigFiles(configFiles)
+	}
 
+	for _, cfg := range configFiles {
 		if strings.TrimSpace(cfg.DefaultContent) == "" {
 			continue
 		}
@@ -596,10 +642,37 @@ func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	var parentVelocityServer *auth.GameServer
+	serverMetadata := parseGameServerMetadata(server.Metadata)
+	parentServerID := strings.TrimSpace(serverMetadata.ParentServerID)
+	if parentServerID != "" {
+		nodeServers, err := s.Users.ListGameServersForNode(r.Context(), node.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to resolve parent velocity server")
+			return
+		}
+		for i := range nodeServers {
+			if nodeServers[i].ID != parentServerID {
+				continue
+			}
+			if isVelocityServer(&nodeServers[i]) {
+				parentVelocityServer = &nodeServers[i]
+			}
+			break
+		}
+	}
+
 	baseURL, apiKey, err := s.workerTargetFromNode(node)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
+	}
+
+	if parentVelocityServer != nil {
+		if err := s.unregisterVelocityBackendFromProxy(r.Context(), baseURL, apiKey, parentVelocityServer, server.Slug); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to update velocity server configuration")
+			return
+		}
 	}
 
 	if err := s.cleanupGameServerOnWorker(r.Context(), baseURL, apiKey, server); err != nil {
@@ -845,6 +918,55 @@ func validateVelocityBackendTemplate(template *gameServerTemplate) error {
 	return nil
 }
 
+func defaultMinecraftSoftwareForTemplate(template *gameServerTemplate) string {
+	if template != nil && isVelocityTemplateID(template.ID) {
+		return minecraftSoftwareVelocity
+	}
+	return minecraftSoftwareVanilla
+}
+
+func resolveMinecraftComposeTemplate(template *gameServerTemplate) (*gameServerTemplate, error) {
+	if template == nil {
+		return nil, fmt.Errorf("template is required")
+	}
+	if !strings.EqualFold(strings.TrimSpace(template.Game), "minecraft") {
+		return template, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(template.ID), vanillaTemplateID) {
+		return template, nil
+	}
+
+	vanillaTemplate, err := gameServerTemplateByID(vanillaTemplateID)
+	if err != nil {
+		return nil, err
+	}
+	if vanillaTemplate == nil {
+		return nil, fmt.Errorf("missing required template: %s", vanillaTemplateID)
+	}
+	return vanillaTemplate, nil
+}
+
+func ensureMinecraftRequiredConfigFiles(configFiles []gameServerTemplateConfigFile) []gameServerTemplateConfigFile {
+	result := make([]gameServerTemplateConfigFile, 0, len(configFiles)+1)
+	result = append(result, configFiles...)
+
+	requiredPath := normalizeTemplatePath(minecraftEULAFilePath)
+	for _, cfg := range result {
+		if strings.EqualFold(normalizeTemplatePath(cfg.Path), requiredPath) {
+			return result
+		}
+	}
+
+	result = append(result, gameServerTemplateConfigFile{
+		ID:             minecraftEULAConfigID,
+		Title:          minecraftEULAFileTitle,
+		Path:           requiredPath,
+		Format:         "text",
+		DefaultContent: minecraftEULAContent,
+	})
+	return result
+}
+
 func velocityNetworkName(slug string) string {
 	base := slugify(strings.TrimSpace(slug))
 	if base == "" {
@@ -861,32 +983,470 @@ func velocityBackendHostForSlug(slug string) string {
 	return "vestri-" + base
 }
 
-func buildVelocityBackendCompose(template *gameServerTemplate, values map[string]string) (string, error) {
+func buildVelocityBackendCompose(ctx context.Context, template *gameServerTemplate, values map[string]string) (string, error) {
 	if err := validateVelocityBackendTemplate(template); err != nil {
 		return "", err
 	}
-	const composeInline = `services:
-  minecraft:
-    image: {{MINECRAFT_RUNTIME_IMAGE}}
-    container_name: {{VELOCITY_BACKEND_HOST}}
-    environment:
-      JAVA_ARGS: "{{MINECRAFT_JAVA_ARGS}}"
-      SERVER_DIR: "/server"
-      SERVER_JAR_NAME: "{{MINECRAFT_SERVER_JAR_NAME}}"
-      SERVER_ARGS: "{{MINECRAFT_SERVER_START_ARGS}}"
-    volumes:
-      - ./data:/server
-    stdin_open: true
-    tty: true
-    restart: unless-stopped
-    networks:
-      - velocity
-networks:
-  velocity:
-    external: true
-    name: "{{VELOCITY_NETWORK}}"
-`
-	return renderTemplateText(composeInline, values), nil
+
+	baseCompose, err := resolveTemplateCompose(ctx, template, values)
+	if err != nil {
+		return "", err
+	}
+
+	out := stripComposeServicePorts(baseCompose, "minecraft")
+	out = ensureComposeServiceNetwork(out, "minecraft", "velocity")
+	out = ensureComposeExternalNetwork(out, "velocity", strings.TrimSpace(values["VELOCITY_NETWORK"]))
+	return ensureTextEndsWithNewline(out), nil
+}
+
+func buildVelocityStandaloneCompose(ctx context.Context, template *gameServerTemplate, values map[string]string) (string, error) {
+	baseCompose, err := resolveTemplateCompose(ctx, template, values)
+	if err != nil {
+		return "", err
+	}
+
+	out := setComposeServiceSinglePort(baseCompose, "minecraft", "25577:25577")
+	out = ensureComposeServiceBindVolume(out, "minecraft", "./data:/server")
+	out = ensureComposeServiceEnvironmentValue(out, "minecraft", "TYPE", "VELOCITY")
+	out = ensureComposeServiceNetwork(out, "minecraft", "velocity")
+	out = ensureComposeNamedNetwork(out, "velocity", strings.TrimSpace(values["VELOCITY_NETWORK"]))
+	return ensureTextEndsWithNewline(out), nil
+}
+
+func setComposeServiceSinglePort(content, serviceName, portMapping string) string {
+	portMapping = strings.TrimSpace(portMapping)
+	if portMapping == "" {
+		return content
+	}
+
+	out := stripComposeServicePorts(content, serviceName)
+	lines := splitPreserveTrailingNewline(out)
+	_, serviceEnd, found := findComposeServiceBounds(lines, serviceName)
+	if !found {
+		return out
+	}
+
+	addition := []string{
+		"    ports:",
+		fmt.Sprintf("      - %q", portMapping),
+	}
+	lines = append(lines[:serviceEnd], append(addition, lines[serviceEnd:]...)...)
+	return strings.Join(lines, "\n")
+}
+
+func stripComposeServicePorts(content, serviceName string) string {
+	lines := splitPreserveTrailingNewline(content)
+	serviceStart, serviceEnd, found := findComposeServiceBounds(lines, serviceName)
+	if !found {
+		return content
+	}
+
+	for i := serviceStart + 1; i < serviceEnd; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) != 4 || trimmed != "ports:" {
+			continue
+		}
+
+		removeEnd := i + 1
+		for removeEnd < serviceEnd {
+			nextTrimmed := strings.TrimSpace(lines[removeEnd])
+			if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+				removeEnd++
+				continue
+			}
+			if leadingWhitespaceWidth(lines[removeEnd]) <= 4 {
+				break
+			}
+			removeEnd++
+		}
+		lines = append(lines[:i], lines[removeEnd:]...)
+		break
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ensureComposeServiceNetwork(content, serviceName, networkName string) string {
+	networkName = strings.TrimSpace(networkName)
+	if networkName == "" {
+		return content
+	}
+
+	lines := splitPreserveTrailingNewline(content)
+	serviceStart, serviceEnd, found := findComposeServiceBounds(lines, serviceName)
+	if !found {
+		return content
+	}
+
+	networkStart := -1
+	networkEnd := serviceEnd
+	for i := serviceStart + 1; i < serviceEnd; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) == 4 && trimmed == "networks:" {
+			networkStart = i
+			networkEnd = serviceEnd
+			for j := i + 1; j < serviceEnd; j++ {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+					continue
+				}
+				if leadingWhitespaceWidth(lines[j]) <= 4 {
+					networkEnd = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	networkEntry := "      - " + networkName
+	if networkStart >= 0 {
+		for i := networkStart + 1; i < networkEnd; i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			if strings.EqualFold(trimmed, "- "+networkName) || strings.EqualFold(trimmed, networkName) {
+				return strings.Join(lines, "\n")
+			}
+		}
+		lines = append(lines[:networkEnd], append([]string{networkEntry}, lines[networkEnd:]...)...)
+		return strings.Join(lines, "\n")
+	}
+
+	insertAt := serviceEnd
+	networkBlock := []string{
+		"    networks:",
+		networkEntry,
+	}
+	lines = append(lines[:insertAt], append(networkBlock, lines[insertAt:]...)...)
+	return strings.Join(lines, "\n")
+}
+
+func ensureComposeServiceBindVolume(content, serviceName, mount string) string {
+	mount = strings.TrimSpace(mount)
+	if mount == "" {
+		return content
+	}
+
+	lines := splitPreserveTrailingNewline(content)
+	serviceStart, serviceEnd, found := findComposeServiceBounds(lines, serviceName)
+	if !found {
+		return content
+	}
+
+	volumesStart := -1
+	volumesEnd := serviceEnd
+	for i := serviceStart + 1; i < serviceEnd; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) == 4 && trimmed == "volumes:" {
+			volumesStart = i
+			volumesEnd = serviceEnd
+			for j := i + 1; j < serviceEnd; j++ {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+					continue
+				}
+				if leadingWhitespaceWidth(lines[j]) <= 4 {
+					volumesEnd = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	entry := fmt.Sprintf("      - %q", mount)
+	if volumesStart >= 0 {
+		for i := volumesStart + 1; i < volumesEnd; i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			if strings.EqualFold(trimmed, "- "+mount) || strings.EqualFold(trimmed, "- "+strconv.Quote(mount)) {
+				return strings.Join(lines, "\n")
+			}
+		}
+		lines = append(lines[:volumesEnd], append([]string{entry}, lines[volumesEnd:]...)...)
+		return strings.Join(lines, "\n")
+	}
+
+	insertAt := serviceEnd
+	block := []string{
+		"    volumes:",
+		entry,
+	}
+	lines = append(lines[:insertAt], append(block, lines[insertAt:]...)...)
+	return strings.Join(lines, "\n")
+}
+
+func ensureComposeServiceEnvironmentValue(content, serviceName, key, value string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return content
+	}
+
+	lines := splitPreserveTrailingNewline(content)
+	serviceStart, serviceEnd, found := findComposeServiceBounds(lines, serviceName)
+	if !found {
+		return content
+	}
+
+	envStart := -1
+	envEnd := serviceEnd
+	for i := serviceStart + 1; i < serviceEnd; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) == 4 && trimmed == "environment:" {
+			envStart = i
+			envEnd = serviceEnd
+			for j := i + 1; j < serviceEnd; j++ {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+					continue
+				}
+				if leadingWhitespaceWidth(lines[j]) <= 4 {
+					envEnd = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	entry := fmt.Sprintf("      %s: %q", key, value)
+	if envStart >= 0 {
+		for i := envStart + 1; i < envEnd; i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if leadingWhitespaceWidth(lines[i]) != 6 {
+				continue
+			}
+			if strings.HasPrefix(trimmed, key+":") {
+				lines[i] = entry
+				return strings.Join(lines, "\n")
+			}
+		}
+		lines = append(lines[:envEnd], append([]string{entry}, lines[envEnd:]...)...)
+		return strings.Join(lines, "\n")
+	}
+
+	insertAt := serviceEnd
+	block := []string{
+		"    environment:",
+		entry,
+	}
+	lines = append(lines[:insertAt], append(block, lines[insertAt:]...)...)
+	return strings.Join(lines, "\n")
+}
+
+func ensureComposeExternalNetwork(content, networkKey, networkName string) string {
+	networkKey = strings.TrimSpace(networkKey)
+	networkName = strings.TrimSpace(networkName)
+	if networkKey == "" || networkName == "" {
+		return content
+	}
+
+	lines := splitPreserveTrailingNewline(content)
+
+	networksStart := -1
+	networksEnd := len(lines)
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) == 0 && trimmed == "networks:" {
+			networksStart = i
+			for j := i + 1; j < len(lines); j++ {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+					continue
+				}
+				if leadingWhitespaceWidth(lines[j]) == 0 {
+					networksEnd = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	if networksStart >= 0 {
+		for i := networksStart + 1; i < networksEnd; i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if leadingWhitespaceWidth(lines[i]) == 2 && trimmed == networkKey+":" {
+				return strings.Join(lines, "\n")
+			}
+		}
+
+		addition := []string{
+			"  " + networkKey + ":",
+			"    external: true",
+			fmt.Sprintf("    name: %q", networkName),
+		}
+		lines = append(lines[:networksEnd], append(addition, lines[networksEnd:]...)...)
+		return strings.Join(lines, "\n")
+	}
+
+	block := []string{
+		"networks:",
+		"  " + networkKey + ":",
+		"    external: true",
+		fmt.Sprintf("    name: %q", networkName),
+	}
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+		lines = append(lines, "")
+	}
+	lines = append(lines, block...)
+	return strings.Join(lines, "\n")
+}
+
+func ensureComposeNamedNetwork(content, networkKey, networkName string) string {
+	networkKey = strings.TrimSpace(networkKey)
+	networkName = strings.TrimSpace(networkName)
+	if networkKey == "" || networkName == "" {
+		return content
+	}
+
+	lines := splitPreserveTrailingNewline(content)
+
+	networksStart := -1
+	networksEnd := len(lines)
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) == 0 && trimmed == "networks:" {
+			networksStart = i
+			for j := i + 1; j < len(lines); j++ {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+					continue
+				}
+				if leadingWhitespaceWidth(lines[j]) == 0 {
+					networksEnd = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	block := []string{
+		"  " + networkKey + ":",
+		fmt.Sprintf("    name: %q", networkName),
+	}
+
+	if networksStart >= 0 {
+		entryStart := -1
+		entryEnd := networksEnd
+		for i := networksStart + 1; i < networksEnd; i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if leadingWhitespaceWidth(lines[i]) != 2 {
+				continue
+			}
+			if entryStart < 0 && trimmed == networkKey+":" {
+				entryStart = i
+				continue
+			}
+			if entryStart >= 0 {
+				entryEnd = i
+				break
+			}
+		}
+
+		if entryStart >= 0 {
+			lines = append(lines[:entryStart], append(block, lines[entryEnd:]...)...)
+			return strings.Join(lines, "\n")
+		}
+
+		lines = append(lines[:networksEnd], append(block, lines[networksEnd:]...)...)
+		return strings.Join(lines, "\n")
+	}
+
+	fullBlock := append([]string{"networks:"}, block...)
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+		lines = append(lines, "")
+	}
+	lines = append(lines, fullBlock...)
+	return strings.Join(lines, "\n")
+}
+
+func splitPreserveTrailingNewline(content string) []string {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	return strings.Split(normalized, "\n")
+}
+
+func findComposeServiceBounds(lines []string, serviceName string) (int, int, bool) {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return 0, 0, false
+	}
+
+	servicesStart := -1
+	servicesEnd := len(lines)
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) == 0 && trimmed == "services:" {
+			servicesStart = i
+			for j := i + 1; j < len(lines); j++ {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+					continue
+				}
+				if leadingWhitespaceWidth(lines[j]) == 0 {
+					servicesEnd = j
+					break
+				}
+			}
+			break
+		}
+	}
+	if servicesStart < 0 {
+		return 0, 0, false
+	}
+
+	targetLine := serviceName + ":"
+	serviceStart := -1
+	serviceEnd := servicesEnd
+	for i := servicesStart + 1; i < servicesEnd; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) != 2 {
+			continue
+		}
+		if serviceStart < 0 && trimmed == targetLine {
+			serviceStart = i
+			continue
+		}
+		if serviceStart >= 0 {
+			serviceEnd = i
+			break
+		}
+	}
+	if serviceStart < 0 {
+		return 0, 0, false
+	}
+	return serviceStart, serviceEnd, true
 }
 
 func (s *Server) velocityServerHasBackends(ctx context.Context, nodeID, parentServerID string) (bool, error) {
@@ -959,13 +1519,46 @@ func (s *Server) registerVelocityBackendAndResolveForwardingSecret(
 	)
 	velocityTomlContent = upsertVelocityTomlTryServer(velocityTomlContent, backendServerName)
 	velocityTomlContent = removeTomlTopLevelKey(velocityTomlContent, "forwarding-secret")
-	velocityTomlContent = removeTomlTopLevelKey(velocityTomlContent, "forwarding-secret-file")
+	velocityTomlContent = upsertTomlTopLevelStringKey(
+		velocityTomlContent,
+		"forwarding-secret-file",
+		path.Base(velocityForwardingSecretRelPath),
+	)
 
 	if err := s.workerWriteFile(ctx, baseURL, apiKey, velocityTomlPath, velocityTomlContent); err != nil {
 		return "", err
 	}
 
 	return s.ensureVelocityForwardingSecretFile(ctx, baseURL, apiKey, velocityServer.RootPath)
+}
+
+func (s *Server) unregisterVelocityBackendFromProxy(
+	ctx context.Context,
+	baseURL *url.URL,
+	apiKey string,
+	velocityServer *auth.GameServer,
+	backendServerName string,
+) error {
+	if velocityServer == nil {
+		return fmt.Errorf("velocity server is required")
+	}
+	backendServerName = strings.TrimSpace(backendServerName)
+	if backendServerName == "" {
+		return nil
+	}
+
+	velocityTomlPath := path.Join(velocityServer.RootPath, velocityTomlRelativePath)
+	velocityTomlContent, missing, err := s.workerReadFileOptional(ctx, baseURL, apiKey, velocityTomlPath)
+	if err != nil {
+		return err
+	}
+	if missing || strings.TrimSpace(velocityTomlContent) == "" {
+		return nil
+	}
+
+	velocityTomlContent = removeVelocityTomlServerEntry(velocityTomlContent, backendServerName)
+	velocityTomlContent = removeVelocityTomlTryServer(velocityTomlContent, backendServerName)
+	return s.workerWriteFile(ctx, baseURL, apiKey, velocityTomlPath, velocityTomlContent)
 }
 
 func (s *Server) ensureVelocityForwardingSecretFile(
@@ -999,8 +1592,12 @@ motd = "A Vestri Velocity Proxy"
 show-max-players = 500
 online-mode = true
 player-info-forwarding-mode = "modern"
-servers = {}
-try = []`) + "\n"
+forwarding-secret-file = "forwarding.secret"
+
+[servers]
+try = []
+
+[forced-hosts]`) + "\n"
 }
 
 func extractTomlStringKey(content, key string) string {
@@ -1105,38 +1702,22 @@ func upsertVelocityTomlServerEntry(content, serverName, address string) string {
 		return ensureTextEndsWithNewline(content)
 	}
 
-	entries := make(map[string]string)
-	inlineStart, inlineEnd, inlineRaw, inlineFound := findTomlInlineTableAssignment(content, "servers")
-	if inlineFound {
-		entries = parseTomlInlineServerEntries(inlineRaw)
-	} else {
-		legacyEntries, legacyFound := parseLegacyVelocityServersTable(content)
-		if legacyFound {
-			entries = legacyEntries
-		}
-	}
+	entries := parseVelocityTomlServerEntries(content)
 	entries[serverName] = address
-	serversBlock := formatVelocityServersInlineTable(entries)
+	tryServers := sanitizeVelocityTomlTryServers(parseVelocityTomlTryServers(content), entries, "")
+	return rewriteVelocityTomlRouting(content, entries, tryServers)
+}
 
-	if inlineFound {
-		content = content[:inlineStart] + serversBlock + content[inlineEnd:]
+func removeVelocityTomlServerEntry(content, serverName string) string {
+	serverName = strings.TrimSpace(serverName)
+	if serverName == "" {
 		return ensureTextEndsWithNewline(content)
 	}
 
-	legacyStart, legacyEnd, legacyFound := findLegacyVelocityServersTableBounds(content)
-	if legacyFound {
-		lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-		replacement := strings.Split(serversBlock, "\n")
-		lines = append(lines[:legacyStart], append(replacement, lines[legacyEnd:]...)...)
-		return ensureTextEndsWithNewline(strings.Join(lines, "\n"))
-	}
-
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
-		lines = append(lines, "")
-	}
-	lines = append(lines, strings.Split(serversBlock, "\n")...)
-	return ensureTextEndsWithNewline(strings.Join(lines, "\n"))
+	entries := parseVelocityTomlServerEntries(content)
+	delete(entries, serverName)
+	tryServers := sanitizeVelocityTomlTryServers(parseVelocityTomlTryServers(content), entries, "")
+	return rewriteVelocityTomlRouting(content, entries, tryServers)
 }
 
 func upsertVelocityTomlTryServer(content, serverName string) string {
@@ -1145,24 +1726,219 @@ func upsertVelocityTomlTryServer(content, serverName string) string {
 		return ensureTextEndsWithNewline(content)
 	}
 
-	start, end, raw, found := findTomlInlineArrayAssignment(content, "try")
-	if !found {
-		line := fmt.Sprintf(`try = ["%s"]`, strings.ReplaceAll(serverName, `"`, `\"`))
-		lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-		if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
-			lines = append(lines, "")
+	entries := parseVelocityTomlServerEntries(content)
+	tryServers := sanitizeVelocityTomlTryServers(parseVelocityTomlTryServers(content), entries, serverName)
+	return rewriteVelocityTomlRouting(content, entries, tryServers)
+}
+
+func removeVelocityTomlTryServer(content, serverName string) string {
+	serverName = strings.TrimSpace(serverName)
+	if serverName == "" {
+		return ensureTextEndsWithNewline(content)
+	}
+
+	existingTryServers := parseVelocityTomlTryServers(content)
+	filteredTryServers := make([]string, 0, len(existingTryServers))
+	for _, value := range existingTryServers {
+		if strings.EqualFold(strings.TrimSpace(value), serverName) {
+			continue
 		}
-		lines = append(lines, line)
+		filteredTryServers = append(filteredTryServers, strings.TrimSpace(value))
+	}
+
+	entries := parseVelocityTomlServerEntries(content)
+	tryServers := sanitizeVelocityTomlTryServers(filteredTryServers, entries, "")
+	return rewriteVelocityTomlRouting(content, entries, tryServers)
+}
+
+func parseVelocityTomlServerEntries(content string) map[string]string {
+	if _, _, inlineRaw, inlineFound := findTomlInlineTableAssignment(content, "servers"); inlineFound {
+		return parseTomlInlineServerEntries(inlineRaw)
+	}
+
+	legacyEntries, legacyFound := parseLegacyVelocityServersTable(content)
+	if legacyFound {
+		return legacyEntries
+	}
+	return make(map[string]string)
+}
+
+func parseVelocityTomlTryServers(content string) []string {
+	_, _, raw, found := findTomlInlineArrayAssignment(content, "try")
+	if !found {
+		return nil
+	}
+	return parseTomlStringList(raw)
+}
+
+func sanitizeVelocityTomlTryServers(existing []string, entries map[string]string, preferredServer string) []string {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	canonicalByLower := make(map[string]string, len(entries))
+	for key := range entries {
+		name := strings.TrimSpace(key)
+		if name == "" {
+			continue
+		}
+		canonicalByLower[strings.ToLower(name)] = name
+	}
+	if len(canonicalByLower) == 0 {
+		return nil
+	}
+
+	filtered := make([]string, 0, len(existing))
+	seen := make(map[string]struct{}, len(existing))
+	for _, raw := range existing {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		canonical, exists := canonicalByLower[strings.ToLower(name)]
+		if !exists {
+			continue
+		}
+		lowerName := strings.ToLower(canonical)
+		if _, already := seen[lowerName]; already {
+			continue
+		}
+		seen[lowerName] = struct{}{}
+		filtered = append(filtered, canonical)
+	}
+
+	if len(filtered) == 0 {
+		preferredName := strings.TrimSpace(preferredServer)
+		if preferredName != "" {
+			if canonical, exists := canonicalByLower[strings.ToLower(preferredName)]; exists {
+				filtered = append(filtered, canonical)
+			}
+		}
+	}
+
+	if len(filtered) == 0 {
+		candidates := make([]string, 0, len(canonicalByLower))
+		for _, name := range canonicalByLower {
+			candidates = append(candidates, name)
+		}
+		sort.Strings(candidates)
+		if len(candidates) > 0 {
+			filtered = append(filtered, candidates[0])
+		}
+	}
+
+	return filtered
+}
+
+func rewriteVelocityTomlRouting(content string, entries map[string]string, tryServers []string) string {
+	out := ensureTextEndsWithNewline(strings.ReplaceAll(content, "\r\n", "\n"))
+	out = removeTomlInlineTableAssignments(out, "servers")
+	out = removeTomlTableSection(out, "servers")
+	out = removeTomlInlineArrayAssignments(out, "try")
+	out = removeTomlInlineTableAssignments(out, "forced-hosts")
+	out = removeTomlTableSection(out, "forced-hosts")
+	out = removeTomlTopLevelKey(out, "forced-hosts")
+
+	sanitizedTry := sanitizeVelocityTomlTryServers(tryServers, entries, "")
+	serversBlock := formatVelocityServersSection(entries, sanitizedTry)
+
+	trimmed := strings.TrimRight(out, "\n")
+	if strings.TrimSpace(trimmed) != "" {
+		trimmed += "\n\n"
+	}
+	trimmed += serversBlock + "\n\n[forced-hosts]"
+	return ensureTextEndsWithNewline(trimmed)
+}
+
+func removeTomlInlineTableAssignments(content, key string) string {
+	for {
+		start, end, _, found := findTomlInlineTableAssignment(content, key)
+		if !found {
+			break
+		}
+		content = content[:start] + content[end:]
+	}
+	return ensureTextEndsWithNewline(content)
+}
+
+func removeTomlInlineArrayAssignments(content, key string) string {
+	for {
+		start, end, _, found := findTomlInlineArrayAssignment(content, key)
+		if !found {
+			break
+		}
+		content = content[:start] + content[end:]
+	}
+	return ensureTextEndsWithNewline(content)
+}
+
+func removeTomlTableSection(content, sectionName string) string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	targetHeader := "[" + strings.TrimSpace(sectionName) + "]"
+	sectionStart := -1
+	sectionEnd := len(lines)
+
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if sectionStart < 0 {
+			if strings.EqualFold(trimmed, targetHeader) {
+				sectionStart = i
+			}
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			sectionEnd = i
+			break
+		}
+	}
+
+	if sectionStart < 0 {
 		return ensureTextEndsWithNewline(strings.Join(lines, "\n"))
 	}
 
-	existing := parseTomlStringList(raw)
-	if len(existing) > 0 {
-		return ensureTextEndsWithNewline(content)
+	lines = append(lines[:sectionStart], lines[sectionEnd:]...)
+	return ensureTextEndsWithNewline(strings.Join(lines, "\n"))
+}
+
+func formatVelocityServersSection(entries map[string]string, tryServers []string) string {
+	keys := make([]string, 0, len(entries))
+	for key, address := range entries {
+		name := strings.TrimSpace(key)
+		target := strings.TrimSpace(address)
+		if name == "" || target == "" {
+			continue
+		}
+		keys = append(keys, name)
 	}
-	line := fmt.Sprintf(`try = ["%s"]`, strings.ReplaceAll(serverName, `"`, `\"`))
-	content = content[:start] + line + content[end:]
-	return ensureTextEndsWithNewline(content)
+	sort.Strings(keys)
+
+	lines := make([]string, 0, len(keys)+2)
+	lines = append(lines, "[servers]")
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("%s = %s", key, strconv.Quote(entries[key])))
+	}
+	lines = append(lines, fmt.Sprintf("try = %s", formatTomlStringArray(tryServers)))
+	return strings.Join(lines, "\n")
+}
+
+func formatTomlStringArray(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+
+	quoted := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		quoted = append(quoted, strconv.Quote(value))
+	}
+	if len(quoted) == 0 {
+		return "[]"
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func findTomlInlineTableAssignment(content, key string) (int, int, string, bool) {

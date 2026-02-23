@@ -23,7 +23,7 @@
       "placeholder": "e.g. 1.21.4"
     }
   },
-  "composeInline": "services:\n  minecraft:\n    image: {{MINECRAFT_RUNTIME_IMAGE}}\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25565:25565\"\n    environment:\n      JAVA_ARGS: \"{{MINECRAFT_JAVA_ARGS}}\"\n      SERVER_DIR: \"/server\"\n      SERVER_JAR_NAME: \"{{MINECRAFT_SERVER_JAR_NAME}}\"\n      SERVER_ARGS: \"{{MINECRAFT_SERVER_START_ARGS}}\"\n    volumes:\n      - ./data:/server\n    stdin_open: true\n    tty: true\n    restart: unless-stopped\n",
+  "composeInline": "services:\n  minecraft:\n    image: dhernos/vestri-mc:latest\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25565:25565\"\n    environment:\n      JAVA_ARGS: \"{{MINECRAFT_JAVA_ARGS}}\"\n      SERVER_DIR: \"/server\"\n      SERVER_JAR_NAME: \"{{MINECRAFT_SERVER_JAR_NAME}}\"\n      SERVER_ARGS: \"{{MINECRAFT_SERVER_START_ARGS}}\"\n    volumes:\n      - ./data:/server\n    stdin_open: true\n    tty: true\n    restart: unless-stopped\n",
   "configFiles": [
     {
       "id": "server-properties",

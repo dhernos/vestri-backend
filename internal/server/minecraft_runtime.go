@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultMinecraftRuntimeImage    = "vestri/minecraft-empty:latest"
+	defaultMinecraftRuntimeImage    = "dhernos/vestri-mc:latest"
 	minecraftServerDataDir          = "data"
 	defaultMinecraftServerJarFile   = "server.jar"
 	defaultMinecraftJavaArgs        = "-Xms1G -Xmx2G"
@@ -29,15 +29,17 @@ const (
 )
 
 const (
-	minecraftSoftwareVanilla = "VANILLA"
-	minecraftSoftwarePaper   = "PAPER"
-	minecraftSoftwarePurpur  = "PURPUR"
+	minecraftSoftwareVanilla  = "VANILLA"
+	minecraftSoftwarePaper    = "PAPER"
+	minecraftSoftwarePurpur   = "PURPUR"
+	minecraftSoftwareVelocity = "VELOCITY"
 )
 
 const (
 	mojangVersionManifestURL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 	paperVersionsURL         = "https://api.papermc.io/v2/projects/paper"
 	purpurVersionsURL        = "https://api.purpurmc.org/v2/purpur"
+	velocityVersionsURL      = "https://api.papermc.io/v2/projects/velocity"
 )
 
 var (
@@ -166,9 +168,6 @@ func shouldProvisionMinecraftServerArtifact(template *gameServerTemplate) bool {
 	if template == nil {
 		return false
 	}
-	if isVelocityTemplateID(template.ID) {
-		return false
-	}
 	return strings.EqualFold(strings.TrimSpace(template.Game), "minecraft")
 }
 
@@ -180,6 +179,8 @@ func normalizeMinecraftSoftware(value string) string {
 		return minecraftSoftwarePaper
 	case minecraftSoftwarePurpur:
 		return minecraftSoftwarePurpur
+	case minecraftSoftwareVelocity:
+		return minecraftSoftwareVelocity
 	default:
 		return ""
 	}
@@ -199,6 +200,8 @@ func listMinecraftVersionsForSoftware(ctx context.Context, software string) ([]s
 			return fetchPaperReleaseVersions(fetchCtx)
 		case minecraftSoftwarePurpur:
 			return fetchPurpurReleaseVersions(fetchCtx)
+		case minecraftSoftwareVelocity:
+			return fetchVelocityReleaseVersions(fetchCtx)
 		default:
 			return nil, fmt.Errorf("unsupported minecraft software: %s", normalizedSoftware)
 		}
@@ -377,6 +380,14 @@ func fetchPurpurReleaseVersions(ctx context.Context) ([]string, error) {
 	return normalizeMinecraftVersionList(payload.Versions), nil
 }
 
+func fetchVelocityReleaseVersions(ctx context.Context) ([]string, error) {
+	var payload paperProjectVersionsResponse
+	if err := fetchExternalJSON(ctx, velocityVersionsURL, &payload); err != nil {
+		return nil, err
+	}
+	return normalizeMinecraftVersionList(payload.Versions), nil
+}
+
 func fetchExternalJSON(ctx context.Context, endpoint string, dst interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -420,6 +431,8 @@ func resolveMinecraftServerArtifact(
 		return resolvePaperServerArtifact(ctx, requestedGameVersion)
 	case minecraftSoftwarePurpur:
 		return resolvePurpurServerArtifact(ctx, requestedGameVersion)
+	case minecraftSoftwareVelocity:
+		return resolveVelocityServerArtifact(ctx, requestedGameVersion)
 	default:
 		return nil, fmt.Errorf("unsupported server software %q", software)
 	}
@@ -600,6 +613,88 @@ func resolvePurpurServerArtifact(ctx context.Context, requestedVersion string) (
 	}, nil
 }
 
+func resolveVelocityServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+	version := strings.TrimSpace(requestedVersion)
+	if version == "" || strings.EqualFold(version, "LATEST") {
+		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwareVelocity)
+		if err != nil {
+			return nil, err
+		}
+		if len(versions) == 0 {
+			return nil, fmt.Errorf("no velocity versions are available")
+		}
+		version = versions[0]
+	}
+	if !isStableMinecraftVersion(version) {
+		return nil, fmt.Errorf("velocity version %q is invalid", version)
+	}
+
+	buildURL := fmt.Sprintf(
+		"https://api.papermc.io/v2/projects/velocity/versions/%s/builds",
+		url.PathEscape(version),
+	)
+
+	var payload paperBuildsResponse
+	if err := fetchExternalJSON(ctx, buildURL, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Builds) == 0 {
+		return nil, fmt.Errorf("velocity version %s has no builds", version)
+	}
+
+	selectedBuild := 0
+	selectedName := ""
+	selectedChannel := ""
+	for _, build := range payload.Builds {
+		name := strings.TrimSpace(build.Downloads.Application.Name)
+		if name == "" {
+			continue
+		}
+		channel := strings.ToLower(strings.TrimSpace(build.Channel))
+		if selectedBuild == 0 {
+			selectedBuild = build.Build
+			selectedName = name
+			selectedChannel = channel
+			continue
+		}
+
+		currentIsDefault := selectedChannel == "default"
+		nextIsDefault := channel == "default"
+		if currentIsDefault != nextIsDefault {
+			if nextIsDefault {
+				selectedBuild = build.Build
+				selectedName = name
+				selectedChannel = channel
+			}
+			continue
+		}
+
+		if build.Build > selectedBuild {
+			selectedBuild = build.Build
+			selectedName = name
+			selectedChannel = channel
+		}
+	}
+
+	if selectedBuild == 0 || selectedName == "" {
+		return nil, fmt.Errorf("velocity version %s has no downloadable build", version)
+	}
+
+	downloadURL := fmt.Sprintf(
+		"https://api.papermc.io/v2/projects/velocity/versions/%s/builds/%d/downloads/%s",
+		url.PathEscape(version),
+		selectedBuild,
+		url.PathEscape(selectedName),
+	)
+
+	return &minecraftServerArtifact{
+		Software:    minecraftSoftwareVelocity,
+		Version:     version,
+		DownloadURL: downloadURL,
+		FileName:    selectedName,
+	}, nil
+}
+
 func fileNameFromURL(rawURL, fallback string) string {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -612,34 +707,40 @@ func fileNameFromURL(rawURL, fallback string) string {
 	return name
 }
 
-func minecraftServerJarFileNameForArtifact(artifact *minecraftServerArtifact) string {
+func minecraftServerJarFileNameForArtifact(artifact *minecraftServerArtifact) (string, error) {
 	if artifact == nil {
-		return defaultMinecraftServerJarFile
+		return "", fmt.Errorf("minecraft artifact is required")
 	}
 	return normalizeMinecraftJarFileName(artifact.FileName)
 }
 
-func minecraftServerJarContainerPath(fileName string) string {
-	name := normalizeMinecraftJarFileName(fileName)
-	return defaultMinecraftServerJarPrefix + name
+func minecraftServerJarContainerPath(fileName string) (string, error) {
+	name, err := normalizeMinecraftJarFileName(fileName)
+	if err != nil {
+		return "", err
+	}
+	return defaultMinecraftServerJarPrefix + name, nil
 }
 
-func minecraftServerJarWorkerPath(rootPath, fileName string) string {
-	name := normalizeMinecraftJarFileName(fileName)
-	return path.Join(rootPath, minecraftServerDataDir, name)
+func minecraftServerJarWorkerPath(rootPath, fileName string) (string, error) {
+	name, err := normalizeMinecraftJarFileName(fileName)
+	if err != nil {
+		return "", err
+	}
+	return path.Join(rootPath, minecraftServerDataDir, name), nil
 }
 
-func normalizeMinecraftJarFileName(raw string) string {
+func normalizeMinecraftJarFileName(raw string) (string, error) {
 	fileName := strings.TrimSpace(raw)
 	fileName = strings.ReplaceAll(fileName, "\\", "/")
 	fileName = strings.TrimSpace(path.Base(fileName))
 	if fileName == "" || fileName == "." || fileName == "/" {
-		fileName = defaultMinecraftServerJarFile
+		return "", fmt.Errorf("minecraft artifact file name is empty")
 	}
 	if !strings.HasSuffix(strings.ToLower(fileName), ".jar") {
 		fileName += ".jar"
 	}
-	return fileName
+	return fileName, nil
 }
 
 func (s *Server) provisionMinecraftServerArtifactOnWorker(
@@ -656,7 +757,10 @@ func (s *Server) provisionMinecraftServerArtifactOnWorker(
 	if downloadURL == "" {
 		return fmt.Errorf("minecraft artifact download URL is empty")
 	}
-	targetPath := minecraftServerJarWorkerPath(rootPath, artifact.FileName)
+	targetPath, err := minecraftServerJarWorkerPath(rootPath, artifact.FileName)
+	if err != nil {
+		return err
+	}
 	return s.workerFetchRemoteFile(ctx, baseURL, apiKey, downloadURL, targetPath, maxMinecraftJarDownloadBytes)
 }
 
