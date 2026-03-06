@@ -652,7 +652,7 @@ func normalizeNodeBaseURL(raw string) (string, string, error) {
 		return "", "", fmt.Errorf("base URL must not be empty")
 	}
 	if !strings.Contains(trimmed, "://") {
-		trimmed = "http://" + trimmed
+		trimmed = "https://" + trimmed
 	}
 
 	parsed, err := url.Parse(trimmed)

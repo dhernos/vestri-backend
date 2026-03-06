@@ -24,6 +24,8 @@ type Config struct {
 	TOTPIssuer              string
 	WorkerAPIURL            string
 	WorkerAPIKey            string
+	WorkerTLSCACertFile     string
+	WorkerTLSCACertDir      string
 	NodeAPIKeyEncryptionKey string
 	Email                   EmailConfig
 	TrustedProxies          []string
@@ -84,8 +86,10 @@ func Load() (Config, error) {
 		NoEmailVerify:           parseBool(os.Getenv("NO_EMAIL_VERIFY")),
 		SessionTTL:              7 * 24 * time.Hour,
 		TOTPIssuer:              getenvDefault("TOTP_ISSUER", "AuthService"),
-		WorkerAPIURL:            getenvDefault("WORKER_API_URL", "http://localhost:8031"),
+		WorkerAPIURL:            getenvDefault("WORKER_API_URL", "https://localhost:8031"),
 		WorkerAPIKey:            os.Getenv("WORKER_API_KEY"),
+		WorkerTLSCACertFile:     os.Getenv("WORKER_TLS_CA_CERT_FILE"),
+		WorkerTLSCACertDir:      getenvDefault("WORKER_TLS_CA_CERT_DIR", "./certs/worker-cas"),
 		NodeAPIKeyEncryptionKey: os.Getenv("NODE_API_KEY_ENCRYPTION_KEY"),
 		TrustedProxies:          parseList(os.Getenv("TRUSTED_PROXIES")),
 	}

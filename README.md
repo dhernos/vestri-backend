@@ -1,40 +1,77 @@
 # Vestri Backend (Go)
 
-This backend uses PostgreSQL and Redis.
+Vestri backend with PostgreSQL + Redis, user/session/auth flows, node management, and signed worker proxy requests.
 
-## Database schema and migrations
+## Requirements
 
-The schema is defined in SQL migrations under `migrations/`.
+- Go `1.22+`
+- PostgreSQL
+- Redis
 
-- `000001_init.up.sql` creates the initial tables and indexes.
-- `000001_init.down.sql` rolls the initial schema back.
-- Applied versions are tracked in `schema_migrations`.
+## Run locally
 
-Current tables:
+```bash
+go run ./cmd/server
+```
 
-- `"User"`
-- `"VerificationToken"`
-- `"OAuthAccount"`
-- `"PasskeyCredential"`
+For explicit migration step:
 
-## Simple deployment (no extra migration container)
+```bash
+go run ./cmd/migrate
+go run ./cmd/server
+```
 
-You have two simple options:
+## Migrations
 
-1. Auto-migrate on app startup (default)
-   - Start your backend normally.
-   - The server runs migrations before serving traffic.
-   - Disable with `AUTO_MIGRATE=false`.
+Schema lives in `migrations/` and applied versions are stored in `schema_migrations`.
 
-2. One-time migrate command in your deploy pipeline
-   - Run `go run ./cmd/migrate` before rolling out `cmd/server`.
-   - Useful if you want strict separation of schema rollout and app start.
+- Auto-migrate is enabled by default on server startup.
+- Disable with `AUTO_MIGRATE=false` if you want strict rollout separation.
 
-Environment variables:
+## Core environment variables
 
 - `DATABASE_URL` (required)
+- `REDIS_URL` (optional, default `redis://localhost:6379`)
+- `PORT` (optional, default `8080`)
 - `AUTO_MIGRATE` (optional, default `true`)
 - `MIGRATIONS_DIR` (optional, default `./migrations`)
 - `LOG_FILE` (optional, default `logs/server.log`)
 - `LOG_MAX_SIZE_MB` (optional, default `20`)
 - `LOG_MAX_BACKUPS` (optional, default `3`)
+- `NODE_API_KEY_ENCRYPTION_KEY` (recommended for encrypted node API key storage)
+
+## Worker TLS trust (v1.0 default)
+
+Backend-to-worker should default to HTTPS.
+
+For custom/internal worker CAs:
+
+- `WORKER_TLS_CA_CERT_DIR` (default `./certs/worker-cas`)
+- `WORKER_TLS_CA_CERT_FILE` (optional single extra PEM file)
+
+Behavior:
+
+- Backend loads all `.crt`, `.pem`, `.cer` files from `WORKER_TLS_CA_CERT_DIR`.
+- This supports multiple worker nodes with different CAs.
+- You can keep one CA file per node, for example:
+  - `certs/worker-cas/node-eu.crt`
+  - `certs/worker-cas/node-us.crt`
+
+## Node base URL behavior
+
+When creating/updating a node:
+
+- If URL has no scheme, backend assumes `https://` by default.
+- HTTP is still supported if you explicitly set `http://...`.
+
+## HTTP fallback (explicit opt-in)
+
+Plain HTTP between backend and worker remains possible but must be intentional:
+
+1. Worker:
+   - `useTLS=false`
+   - `require_tls=false`
+2. Node base URL in backend:
+   - explicit `http://host:port`
+
+Without explicit `http://`, backend defaults to HTTPS.

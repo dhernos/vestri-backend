@@ -45,5 +45,7 @@ logs/server.log
 next-env.d.ts
 
 certificates
+/certs/worker-cas/*
+!/certs/worker-cas/.gitkeep
 
 .gocache/

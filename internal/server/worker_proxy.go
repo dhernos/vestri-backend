@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +24,11 @@ import (
 )
 
 var workerHTTPClient = &http.Client{
-	Transport: &http.Transport{
+	Transport: newWorkerTransport(),
+}
+
+func newWorkerTransport() *http.Transport {
+	return &http.Transport{
 		Proxy:                 nil,
 		ForceAttemptHTTP2:     false,
 		DisableKeepAlives:     true,
@@ -31,7 +38,73 @@ var workerHTTPClient = &http.Client{
 		MaxConnsPerHost:       0,
 		IdleConnTimeout:       0,
 		ResponseHeaderTimeout: 10 * time.Minute,
-	},
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+}
+
+func configureWorkerHTTPClient(caCertFile, caCertDir string) error {
+	transport := newWorkerTransport()
+	caCertFile = strings.TrimSpace(caCertFile)
+	caCertDir = strings.TrimSpace(caCertDir)
+
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+
+	loadedCount := 0
+	appendCAFromFile := func(path string, source string) error {
+		caPEM, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("failed to read %s %q: %w", source, path, err)
+		}
+		if ok := roots.AppendCertsFromPEM(caPEM); !ok {
+			return fmt.Errorf("%s %q does not contain a valid PEM certificate", source, path)
+		}
+		loadedCount++
+		return nil
+	}
+
+	if caCertFile != "" {
+		if err := appendCAFromFile(caCertFile, "WORKER_TLS_CA_CERT_FILE"); err != nil {
+			return err
+		}
+	}
+
+	if caCertDir != "" {
+		entries, err := os.ReadDir(caCertDir)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("failed to read WORKER_TLS_CA_CERT_DIR %q: %w", caCertDir, err)
+			}
+		} else {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				ext := strings.ToLower(filepath.Ext(entry.Name()))
+				if ext != ".crt" && ext != ".pem" && ext != ".cer" {
+					continue
+				}
+				fullPath := filepath.Join(caCertDir, entry.Name())
+				if err := appendCAFromFile(fullPath, "WORKER_TLS_CA_CERT_DIR file"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	if loadedCount == 0 {
+		workerHTTPClient.Transport = transport
+		return nil
+	}
+
+	transport.TLSClientConfig.RootCAs = roots
+	workerHTTPClient.Transport = transport
+	log.Printf("worker HTTP client: loaded %d custom worker CA certificate file(s)", loadedCount)
+	return nil
 }
 
 func (s *Server) handleWorkerProxy(w http.ResponseWriter, r *http.Request) {

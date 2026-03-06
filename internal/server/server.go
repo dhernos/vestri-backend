@@ -44,6 +44,9 @@ func NewServer(cfg config.Config, users *auth.UserRepository, sessions *auth.Ses
 	if err != nil {
 		return nil, err
 	}
+	if err := configureWorkerHTTPClient(cfg.WorkerTLSCACertFile, cfg.WorkerTLSCACertDir); err != nil {
+		return nil, err
+	}
 
 	return &Server{
 		Users:          users,
