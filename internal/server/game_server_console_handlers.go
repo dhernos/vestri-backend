@@ -54,6 +54,54 @@ func (s *Server) handleGameServerConsoleLogsStream(w http.ResponseWriter, r *htt
 	s.proxySignedWorkerGET(w, r, baseURL, apiKey, workerPath, false)
 }
 
+func (s *Server) handleGameServerConsoleLogsWS(w http.ResponseWriter, r *http.Request) {
+	sess, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
+	if !ok {
+		return
+	}
+	if !canReadGameServerConsole(serverRole) {
+		writeError(w, http.StatusForbidden, "Server permission denied for this action")
+		return
+	}
+	if !isWebsocketUpgradeRequest(r) {
+		writeError(w, http.StatusBadRequest, "WebSocket upgrade required")
+		return
+	}
+
+	baseURL, apiKey, err := s.workerTargetFromNode(node)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
+		return
+	}
+
+	logOptions, err := parseConsoleLogsQuery(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, ok := logOptions["follow"]; !ok {
+		logOptions.Set("follow", "true")
+	}
+
+	workerPath := buildWorkerConsolePath(
+		"/stack/logs/ws",
+		server.StackName,
+		r.URL.Query().Get("service"),
+		logOptions,
+	)
+	log.Printf(
+		"game server console logs ws start user=%s node=%s server=%s stack=%s service=%q follow=%q tail=%q",
+		sess.UserID,
+		node.Slug,
+		server.Slug,
+		server.StackName,
+		strings.TrimSpace(r.URL.Query().Get("service")),
+		logOptions.Get("follow"),
+		logOptions.Get("tail"),
+	)
+	s.proxySignedWorkerGET(w, r, baseURL, apiKey, workerPath, true)
+}
+
 func (s *Server) handleGameServerConsoleExecWS(w http.ResponseWriter, r *http.Request) {
 	sess, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
 	if !ok {
@@ -152,7 +200,12 @@ func (s *Server) proxySignedWorkerGET(w http.ResponseWriter, r *http.Request, ba
 
 	proxy := httputil.NewSingleHostReverseProxy(baseURL)
 	proxy.Transport = workerHTTPClient.Transport
-	proxy.FlushInterval = 50 * time.Millisecond
+	if requireUpgrade {
+		proxy.FlushInterval = 0
+	} else {
+		// Force immediate chunk flushes for live console logs.
+		proxy.FlushInterval = -1
+	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		log.Printf("worker console proxy response method=%s path=%s status=%d", resp.Request.Method, signedPath, resp.StatusCode)
 		return nil
