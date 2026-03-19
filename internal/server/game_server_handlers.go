@@ -75,31 +75,33 @@ type gameServerPermissions struct {
 }
 
 type gameServerResponse struct {
-	ID              string                         `json:"id"`
-	NodeID          string                         `json:"nodeId"`
-	Slug            string                         `json:"slug"`
-	Name            string                         `json:"name"`
-	TemplateID      string                         `json:"templateId"`
-	TemplateVersion string                         `json:"templateVersion"`
-	TemplateName    string                         `json:"templateName"`
-	Game            string                         `json:"game"`
-	SoftwareVersion string                         `json:"softwareVersion,omitempty"`
-	GameVersion     string                         `json:"gameVersion,omitempty"`
-	StackName       string                         `json:"stackName"`
-	RootPath        string                         `json:"rootPath"`
-	ComposePath     string                         `json:"composePath"`
-	Kind            string                         `json:"kind"`
-	ParentServerID  string                         `json:"parentServerId,omitempty"`
-	ConnectHost     string                         `json:"connectHost,omitempty"`
-	ConnectPort     int                            `json:"connectPort,omitempty"`
-	ConfigFiles     []gameServerConfigFileResponse `json:"configFiles"`
-	Status          string                         `json:"status"`
-	StatusOutput    string                         `json:"statusOutput,omitempty"`
-	StatusError     string                         `json:"statusError,omitempty"`
-	Permissions     gameServerPermissions          `json:"permissions"`
-	CreatedByUserID string                         `json:"createdByUserId"`
-	CreatedAt       time.Time                      `json:"createdAt"`
-	UpdatedAt       time.Time                      `json:"updatedAt"`
+	ID                   string                         `json:"id"`
+	NodeID               string                         `json:"nodeId"`
+	Slug                 string                         `json:"slug"`
+	Name                 string                         `json:"name"`
+	TemplateID           string                         `json:"templateId"`
+	TemplateVersion      string                         `json:"templateVersion"`
+	TemplateName         string                         `json:"templateName"`
+	Game                 string                         `json:"game"`
+	SoftwareVersion      string                         `json:"softwareVersion,omitempty"`
+	GameVersion          string                         `json:"gameVersion,omitempty"`
+	StackName            string                         `json:"stackName"`
+	RootPath             string                         `json:"rootPath"`
+	ComposePath          string                         `json:"composePath"`
+	Kind                 string                         `json:"kind"`
+	ParentServerID       string                         `json:"parentServerId,omitempty"`
+	ConnectHost          string                         `json:"connectHost,omitempty"`
+	ConnectPort          int                            `json:"connectPort,omitempty"`
+	ConfigFiles          []gameServerConfigFileResponse `json:"configFiles"`
+	Status               string                         `json:"status"`
+	StatusOutput         string                         `json:"statusOutput,omitempty"`
+	StatusError          string                         `json:"statusError,omitempty"`
+	ImageUpdateAvailable bool                           `json:"imageUpdateAvailable"`
+	ImageStatusError     string                         `json:"imageStatusError,omitempty"`
+	Permissions          gameServerPermissions          `json:"permissions"`
+	CreatedByUserID      string                         `json:"createdByUserId"`
+	CreatedAt            time.Time                      `json:"createdAt"`
+	UpdatedAt            time.Time                      `json:"updatedAt"`
 }
 
 func (s *Server) handleListGameServerTemplates(w http.ResponseWriter, r *http.Request) {
@@ -183,14 +185,16 @@ func (s *Server) handleListGameServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	includeStatus := includeStatusRequested(r)
+	includeImageStatus := includeImageStatusRequested(r)
 	var (
 		baseURL *url.URL
 		apiKey  string
 	)
-	if includeStatus {
+	if includeStatus || includeImageStatus {
 		baseURL, apiKey, err = s.workerTargetFromNode(node)
 		if err != nil {
 			includeStatus = false
+			includeImageStatus = false
 		}
 	}
 
@@ -202,6 +206,8 @@ func (s *Server) handleListGameServers(w http.ResponseWriter, r *http.Request) {
 		state := "unknown"
 		output := ""
 		statusErr := ""
+		imageUpdateAvailable := false
+		imageStatusErr := ""
 		permissions := buildGameServerPermissions(node.AccessRole, filteredServers[i].AccessRole)
 
 		if includeStatus && canReadGameServerConsole(filteredServers[i].AccessRole) {
@@ -212,6 +218,18 @@ func (s *Server) handleListGameServers(w http.ResponseWriter, r *http.Request) {
 				statusErr = resolveErr.Error()
 			}
 		}
+		if includeImageStatus {
+			resolvedImageUpdateAvailable, resolveErr := s.workerStackImageStatus(
+				r.Context(),
+				baseURL,
+				apiKey,
+				filteredServers[i].StackName,
+			)
+			imageUpdateAvailable = resolvedImageUpdateAvailable
+			if resolveErr != nil {
+				imageStatusErr = resolveErr.Error()
+			}
+		}
 
 		responsePermissions.CanView = responsePermissions.CanView || permissions.CanView
 		responsePermissions.CanControl = responsePermissions.CanControl || permissions.CanControl
@@ -219,13 +237,25 @@ func (s *Server) handleListGameServers(w http.ResponseWriter, r *http.Request) {
 		responsePermissions.CanReadConsole = responsePermissions.CanReadConsole || permissions.CanReadConsole
 		responsePermissions.CanManage = responsePermissions.CanManage || permissions.CanManage
 
-		resp = append(resp, buildGameServerResponse(&filteredServers[i].GameServer, permissions, state, output, statusErr))
+		resp = append(
+			resp,
+			buildGameServerResponse(
+				&filteredServers[i].GameServer,
+				permissions,
+				state,
+				output,
+				statusErr,
+				imageUpdateAvailable,
+				imageStatusErr,
+			),
+		)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"servers":       resp,
-		"permissions":   responsePermissions,
-		"includeStatus": includeStatus,
+		"servers":            resp,
+		"permissions":        responsePermissions,
+		"includeStatus":      includeStatus,
+		"includeImageStatus": includeImageStatus,
 	})
 }
 
@@ -548,7 +578,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 
 	permissions := buildGameServerPermissions(node.AccessRole, serverRole)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"server": buildGameServerResponse(created, permissions, "unknown", "", ""),
+		"server": buildGameServerResponse(created, permissions, "unknown", "", "", false, ""),
 	})
 }
 
@@ -565,23 +595,51 @@ func (s *Server) handleGetGameServer(w http.ResponseWriter, r *http.Request) {
 	state := "unknown"
 	output := ""
 	statusErr := ""
-	if includeStatusRequested(r) && canReadGameServerConsole(serverRole) {
+	imageUpdateAvailable := false
+	imageStatusErr := ""
+	includeStatus := includeStatusRequested(r) && canReadGameServerConsole(serverRole)
+	includeImageStatus := includeImageStatusRequested(r)
+	if includeStatus || includeImageStatus {
 		baseURL, apiKey, err := s.workerTargetFromNode(node)
 		if err == nil {
-			resolvedState, resolvedOutput, resolveErr := s.workerStackStatus(r.Context(), baseURL, apiKey, server.StackName)
-			state = resolvedState
-			output = resolvedOutput
-			if resolveErr != nil {
-				statusErr = resolveErr.Error()
+			if includeStatus {
+				resolvedState, resolvedOutput, resolveErr := s.workerStackStatus(r.Context(), baseURL, apiKey, server.StackName)
+				state = resolvedState
+				output = resolvedOutput
+				if resolveErr != nil {
+					statusErr = resolveErr.Error()
+				}
 			}
-		} else {
+			if includeImageStatus {
+				resolvedImageUpdateAvailable, resolveErr := s.workerStackImageStatus(
+					r.Context(),
+					baseURL,
+					apiKey,
+					server.StackName,
+				)
+				imageUpdateAvailable = resolvedImageUpdateAvailable
+				if resolveErr != nil {
+					imageStatusErr = resolveErr.Error()
+				}
+			}
+		} else if includeStatus {
 			statusErr = err.Error()
+		} else if includeImageStatus {
+			imageStatusErr = err.Error()
 		}
 	}
 
 	permissions := buildGameServerPermissions(node.AccessRole, serverRole)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"server": buildGameServerResponse(server, permissions, state, output, statusErr),
+		"server": buildGameServerResponse(
+			server,
+			permissions,
+			state,
+			output,
+			statusErr,
+			imageUpdateAvailable,
+			imageStatusErr,
+		),
 	})
 }
 
@@ -618,6 +676,44 @@ func (s *Server) handleStartGameServer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStopGameServer(w http.ResponseWriter, r *http.Request) {
 	s.handleGameServerStackAction(w, r, "down")
+}
+
+func (s *Server) handleRepullGameServerImages(w http.ResponseWriter, r *http.Request) {
+	_, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
+	if !ok {
+		return
+	}
+	if !canControlGameServer(serverRole) {
+		writeError(w, http.StatusForbidden, "Only server owner/admin/operator can repull images for this server")
+		return
+	}
+
+	baseURL, apiKey, err := s.workerTargetFromNode(node)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
+		return
+	}
+
+	output, err := s.workerStackAction(r.Context(), baseURL, apiKey, "pull", server.StackName)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+			"message": "Worker stack action failed",
+			"action":  "pull",
+			"output":  output,
+		})
+		return
+	}
+
+	imageUpdateAvailable, statusErr := s.workerStackImageStatus(r.Context(), baseURL, apiKey, server.StackName)
+	resp := map[string]interface{}{
+		"action":               "pull",
+		"output":               output,
+		"imageUpdateAvailable": imageUpdateAvailable,
+	}
+	if statusErr != nil {
+		resp["imageStatusError"] = statusErr.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) {
@@ -797,6 +893,16 @@ func includeStatusRequested(r *http.Request) bool {
 	}
 }
 
+func includeImageStatusRequested(r *http.Request) bool {
+	raw := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("includeImageStatus")))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func buildGameServerPermissions(nodeRole, serverRole string) gameServerPermissions {
 	return gameServerPermissions{
 		CanView:        canViewGameServer(serverRole),
@@ -808,7 +914,15 @@ func buildGameServerPermissions(nodeRole, serverRole string) gameServerPermissio
 	}
 }
 
-func buildGameServerResponse(srv *auth.GameServer, permissions gameServerPermissions, status, statusOutput, statusErr string) gameServerResponse {
+func buildGameServerResponse(
+	srv *auth.GameServer,
+	permissions gameServerPermissions,
+	status,
+	statusOutput,
+	statusErr string,
+	imageUpdateAvailable bool,
+	imageStatusErr string,
+) gameServerResponse {
 	metadata := parseGameServerMetadata(srv.Metadata)
 
 	state := status
@@ -835,31 +949,33 @@ func buildGameServerResponse(srv *auth.GameServer, permissions gameServerPermiss
 	}
 
 	return gameServerResponse{
-		ID:              srv.ID,
-		NodeID:          srv.NodeID,
-		Slug:            srv.Slug,
-		Name:            name,
-		TemplateID:      srv.TemplateID,
-		TemplateVersion: srv.TemplateVersion,
-		TemplateName:    metadata.TemplateName,
-		Game:            metadata.Game,
-		SoftwareVersion: metadata.SoftwareVersion,
-		GameVersion:     metadata.GameVersion,
-		StackName:       srv.StackName,
-		RootPath:        srv.RootPath,
-		ComposePath:     srv.ComposePath,
-		Kind:            kind,
-		ParentServerID:  strings.TrimSpace(metadata.ParentServerID),
-		ConnectHost:     strings.TrimSpace(metadata.ConnectHost),
-		ConnectPort:     connectPort,
-		ConfigFiles:     configFilesToResponse(metadata.ConfigFiles),
-		Status:          state,
-		StatusOutput:    statusOutput,
-		StatusError:     statusErr,
-		Permissions:     permissions,
-		CreatedByUserID: srv.CreatedByUserID,
-		CreatedAt:       srv.CreatedAt,
-		UpdatedAt:       srv.UpdatedAt,
+		ID:                   srv.ID,
+		NodeID:               srv.NodeID,
+		Slug:                 srv.Slug,
+		Name:                 name,
+		TemplateID:           srv.TemplateID,
+		TemplateVersion:      srv.TemplateVersion,
+		TemplateName:         metadata.TemplateName,
+		Game:                 metadata.Game,
+		SoftwareVersion:      metadata.SoftwareVersion,
+		GameVersion:          metadata.GameVersion,
+		StackName:            srv.StackName,
+		RootPath:             srv.RootPath,
+		ComposePath:          srv.ComposePath,
+		Kind:                 kind,
+		ParentServerID:       strings.TrimSpace(metadata.ParentServerID),
+		ConnectHost:          strings.TrimSpace(metadata.ConnectHost),
+		ConnectPort:          connectPort,
+		ConfigFiles:          configFilesToResponse(metadata.ConfigFiles),
+		Status:               state,
+		StatusOutput:         statusOutput,
+		StatusError:          statusErr,
+		ImageUpdateAvailable: imageUpdateAvailable,
+		ImageStatusError:     imageStatusErr,
+		Permissions:          permissions,
+		CreatedByUserID:      srv.CreatedByUserID,
+		CreatedAt:            srv.CreatedAt,
+		UpdatedAt:            srv.UpdatedAt,
 	}
 }
 
@@ -2526,6 +2642,8 @@ func (s *Server) workerStackAction(ctx context.Context, baseURL *url.URL, apiKey
 		endpoint = "/stack/up"
 	case "down":
 		endpoint = "/stack/down"
+	case "pull":
+		endpoint = "/stack/pull"
 	default:
 		return "", fmt.Errorf("unsupported stack action: %s", action)
 	}
@@ -2542,6 +2660,29 @@ func (s *Server) workerStackAction(ctx context.Context, baseURL *url.URL, apiKey
 		return output, fmt.Errorf("worker stack action failed (%d)", statusCode)
 	}
 	return output, nil
+}
+
+type stackImageStatusResponse struct {
+	UpdateAvailable bool `json:"updateAvailable"`
+}
+
+func (s *Server) workerStackImageStatus(ctx context.Context, baseURL *url.URL, apiKey, stackName string) (bool, error) {
+	statusPath := "/stack/image-status?stack=" + url.QueryEscape(stackName)
+	statusCode, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, statusPath, nil)
+	if err != nil {
+		return false, err
+	}
+
+	output := strings.TrimSpace(string(body))
+	if statusCode < 200 || statusCode >= 300 {
+		return false, fmt.Errorf("worker stack image status failed (%d): %s", statusCode, output)
+	}
+
+	var statusResp stackImageStatusResponse
+	if err := json.Unmarshal(body, &statusResp); err != nil {
+		return false, fmt.Errorf("failed to parse worker stack image status response: %w", err)
+	}
+	return statusResp.UpdateAvailable, nil
 }
 
 func (s *Server) workerStackStatus(ctx context.Context, baseURL *url.URL, apiKey, stackName string) (string, string, error) {

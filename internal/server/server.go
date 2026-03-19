@@ -134,6 +134,7 @@ func (s *Server) Router() http.Handler {
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/console/exec/ws"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/console/exec/ws", s.handleGameServerConsoleExecWS)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/start"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/start", s.handleStartGameServer)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/stop"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/stop", s.handleStopGameServer)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/images/repull"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/images/repull", s.handleRepullGameServerImages)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/files/list"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/files/list", s.handleListGameServerFiles)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/files/read"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/files/read", s.handleReadGameServerFile)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/files/write"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/files/write", s.handleWriteGameServerFile)

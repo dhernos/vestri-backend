@@ -560,6 +560,8 @@ func (s *Server) handleAcceptNodeInvite(w http.ResponseWriter, r *http.Request) 
 			"unknown",
 			"",
 			"",
+			false,
+			"",
 		),
 	})
 }
