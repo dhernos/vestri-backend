@@ -244,11 +244,6 @@ func (s *Server) getProviderConfig(provider string) *config.OAuthProvider {
 			return nil
 		}
 		return &s.Config.OAuth.GitHub
-	case "discord":
-		if s.Config.OAuth.Discord.ClientID == "" || s.Config.OAuth.Discord.ClientSecret == "" {
-			return nil
-		}
-		return &s.Config.OAuth.Discord
 	default:
 		return nil
 	}
@@ -263,17 +258,6 @@ func (s *Server) buildAuthURL(provider string, cfg config.OAuthProvider, state s
 		q.Set("redirect_uri", cfg.RedirectURL)
 		q.Set("scope", "read:user user:email")
 		q.Set("state", state)
-		u.RawQuery = q.Encode()
-		return u.String()
-	case "discord":
-		u, _ := url.Parse("https://discord.com/api/oauth2/authorize")
-		q := u.Query()
-		q.Set("client_id", cfg.ClientID)
-		q.Set("redirect_uri", cfg.RedirectURL)
-		q.Set("response_type", "code")
-		q.Set("scope", "identify email")
-		q.Set("state", state)
-		q.Set("prompt", "none")
 		u.RawQuery = q.Encode()
 		return u.String()
 	default:
@@ -295,8 +279,6 @@ func (s *Server) exchangeCode(ctx context.Context, provider string, cfg config.O
 	case "github":
 		endpoint = "https://github.com/login/oauth/access_token"
 		accept = "application/json"
-	case "discord":
-		endpoint = "https://discord.com/api/oauth2/token"
 	default:
 		return nil, errors.New("unsupported provider")
 	}
@@ -326,8 +308,6 @@ func (s *Server) fetchOAuthUser(ctx context.Context, provider, accessToken strin
 	switch provider {
 	case "github":
 		return fetchGitHubUser(ctx, accessToken)
-	case "discord":
-		return fetchDiscordUser(ctx, accessToken)
 	default:
 		return nil, errors.New("unsupported provider")
 	}
@@ -391,45 +371,6 @@ func fetchGitHubPrimaryEmail(ctx context.Context, token string) (string, error) 
 		return emails[0].Email, nil
 	}
 	return "", nil
-}
-
-func fetchDiscordUser(ctx context.Context, token string) (*oauthUser, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://discord.com/api/users/@me", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var data struct {
-		ID            string `json:"id"`
-		Username      string `json:"username"`
-		GlobalName    string `json:"global_name"`
-		Email         string `json:"email"`
-		Avatar        string `json:"avatar"`
-		Discriminator string `json:"discriminator"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	name := data.GlobalName
-	if name == "" {
-		name = data.Username
-		if data.Discriminator != "" && data.Discriminator != "0" {
-			name = fmt.Sprintf("%s#%s", data.Username, data.Discriminator)
-		}
-	}
-	var avatarURL string
-	if data.Avatar != "" {
-		avatarURL = fmt.Sprintf("https://cdn.discordapp.com/avatars/%s/%s.png", data.ID, data.Avatar)
-	}
-	return &oauthUser{
-		ID:     data.ID,
-		Email:  data.Email,
-		Name:   name,
-		Avatar: avatarURL,
-	}, nil
 }
 
 func firstNonEmptyLocal(values ...string) string {

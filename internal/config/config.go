@@ -57,8 +57,7 @@ type OAuthProvider struct {
 }
 
 type OAuthConfig struct {
-	GitHub  OAuthProvider
-	Discord OAuthProvider
+	GitHub OAuthProvider
 }
 
 func Load() (Config, error) {
@@ -119,11 +118,6 @@ func Load() (Config, error) {
 			ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
 			ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
 			RedirectURL:  getenvDefault("GITHUB_REDIRECT_URL", cfg.BaseURL+"/api/oauth/github/callback"),
-		},
-		Discord: OAuthProvider{
-			ClientID:     os.Getenv("DISCORD_CLIENT_ID"),
-			ClientSecret: os.Getenv("DISCORD_CLIENT_SECRET"),
-			RedirectURL:  getenvDefault("DISCORD_REDIRECT_URL", cfg.BaseURL+"/api/oauth/discord/callback"),
 		},
 	}
 
