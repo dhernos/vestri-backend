@@ -22,8 +22,6 @@ type Config struct {
 	NoEmailVerify           bool
 	SessionTTL              time.Duration
 	TOTPIssuer              string
-	WorkerAPIURL            string
-	WorkerAPIKey            string
 	WorkerTLSCACertFile     string
 	WorkerTLSCACertDir      string
 	NodeAPIKeyEncryptionKey string
@@ -81,13 +79,11 @@ func Load() (Config, error) {
 		RedisURL:                getenvDefault("REDIS_URL", "redis://localhost:6379"),
 		UploadDir:               getenvDefault("UPLOAD_DIR", "../auth_template/public/uploads"),
 		LogFile:                 getenvDefault("LOG_FILE", "logs/server.log"),
-		LogMaxSizeMB:            getenvIntDefault("LOG_MAX_SIZE_MB", 20),
-		LogMaxBackups:           getenvIntDefault("LOG_MAX_BACKUPS", 3),
-		NoEmailVerify:           parseBool(os.Getenv("NO_EMAIL_VERIFY")),
+		LogMaxSizeMB:            getenvIntDefault("LOG_MAX_SIZE_MB", 5),
+		LogMaxBackups:           getenvIntDefault("LOG_MAX_BACKUPS", 1),
+		NoEmailVerify:           parseBool(getenvDefault("NO_EMAIL_VERIFY", "true")),
 		SessionTTL:              7 * 24 * time.Hour,
-		TOTPIssuer:              getenvDefault("TOTP_ISSUER", "AuthService"),
-		WorkerAPIURL:            getenvDefault("WORKER_API_URL", "https://localhost:8031"),
-		WorkerAPIKey:            os.Getenv("WORKER_API_KEY"),
+		TOTPIssuer:              getenvDefault("TOTP_ISSUER", "Vestri"),
 		WorkerTLSCACertFile:     os.Getenv("WORKER_TLS_CA_CERT_FILE"),
 		WorkerTLSCACertDir:      getenvDefault("WORKER_TLS_CA_CERT_DIR", "./certs/worker-cas"),
 		NodeAPIKeyEncryptionKey: os.Getenv("NODE_API_KEY_ENCRYPTION_KEY"),

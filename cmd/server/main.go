@@ -34,7 +34,7 @@ func main() {
 
 		maxSizeMB := cfg.LogMaxSizeMB
 		if maxSizeMB <= 0 {
-			maxSizeMB = 20
+			maxSizeMB = 5
 		}
 		maxBackups := cfg.LogMaxBackups
 		if maxBackups < 0 {

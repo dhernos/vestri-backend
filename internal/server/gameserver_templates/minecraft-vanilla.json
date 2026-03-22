@@ -15,7 +15,7 @@
     "software": {
       "label": "Server software",
       "defaultValue": "VANILLA",
-      "options": ["VANILLA", "PAPER", "PURPUR"]
+      "options": ["VANILLA", "PAPER", "PURPUR", "SPIGOT", "BUKKIT", "FABRIC"]
     },
     "game": {
       "label": "Game version",

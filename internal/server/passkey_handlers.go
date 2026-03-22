@@ -55,10 +55,7 @@ func (s *Server) handlePasskeyRegisterStart(w http.ResponseWriter, r *http.Reque
 
 	needStepUp := user.TwoFactorEnabled || len(existing) > 0
 	if needStepUp && !s.requireStepUp(r.Context(), sess, "passkey_manage") {
-		if user.TwoFactorMethod != nil && *user.TwoFactorMethod == "email" {
-			locale := i18n.LocaleFromRequest(r)
-			_ = s.sendTwoFactorEmail(r.Context(), user, locale)
-		}
+		s.triggerStepUpChallenge(r, user)
 		writeError(w, http.StatusForbidden, "STEP_UP_REQUIRED")
 		return
 	}
@@ -318,10 +315,7 @@ func (s *Server) handleDeletePasskey(w http.ResponseWriter, r *http.Request) {
 	}
 	user, _ := s.Users.FindByID(r.Context(), sess.UserID)
 	if !s.requireStepUp(r.Context(), sess, "passkey_manage") {
-		if user != nil && user.TwoFactorMethod != nil && *user.TwoFactorMethod == "email" {
-			locale := i18n.LocaleFromRequest(r)
-			_ = s.sendTwoFactorEmail(r.Context(), user, locale)
-		}
+		s.triggerStepUpChallenge(r, user)
 		writeError(w, http.StatusForbidden, "STEP_UP_REQUIRED")
 		return
 	}

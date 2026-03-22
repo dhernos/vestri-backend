@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -84,5 +85,55 @@ func TestEnsureMinecraftRequiredConfigFilesDoesNotDuplicateEULA(t *testing.T) {
 	out := ensureMinecraftRequiredConfigFiles(configFiles)
 	if len(out) != 1 {
 		t.Fatalf("expected no duplicate eula file, got %d entries", len(out))
+	}
+}
+
+func TestNormalizeMinecraftSoftwareSupportsExtendedSoftware(t *testing.T) {
+	testCases := map[string]string{
+		"vanilla": minecraftSoftwareVanilla,
+		"paper":   minecraftSoftwarePaper,
+		"purpur":  minecraftSoftwarePurpur,
+		"spigot":  minecraftSoftwareSpigot,
+		"bukkit":  minecraftSoftwareBukkit,
+		"fabric":  minecraftSoftwareFabric,
+	}
+
+	for input, expected := range testCases {
+		got := normalizeMinecraftSoftware(input)
+		if got != expected {
+			t.Fatalf("expected %q for %q, got %q", expected, input, got)
+		}
+	}
+}
+
+func TestResolveSpigotServerArtifactUsesExpectedDownloadURL(t *testing.T) {
+	artifact, err := resolveSpigotServerArtifact(context.Background(), "1.21.4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if artifact == nil {
+		t.Fatal("expected artifact")
+	}
+	if artifact.Software != minecraftSoftwareSpigot {
+		t.Fatalf("expected software %q, got %q", minecraftSoftwareSpigot, artifact.Software)
+	}
+	if artifact.DownloadURL != "https://download.getbukkit.org/spigot/spigot-1.21.4.jar" {
+		t.Fatalf("expected getbukkit spigot download url, got %q", artifact.DownloadURL)
+	}
+}
+
+func TestResolveBukkitServerArtifactUsesExpectedDownloadURL(t *testing.T) {
+	artifact, err := resolveBukkitServerArtifact(context.Background(), "1.21.4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if artifact == nil {
+		t.Fatal("expected artifact")
+	}
+	if artifact.Software != minecraftSoftwareBukkit {
+		t.Fatalf("expected software %q, got %q", minecraftSoftwareBukkit, artifact.Software)
+	}
+	if artifact.DownloadURL != "https://download.getbukkit.org/craftbukkit/craftbukkit-1.21.4.jar" {
+		t.Fatalf("expected getbukkit bukkit download url, got %q", artifact.DownloadURL)
 	}
 }

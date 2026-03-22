@@ -210,7 +210,7 @@ func (s *Server) handleListGameServers(w http.ResponseWriter, r *http.Request) {
 		imageStatusErr := ""
 		permissions := buildGameServerPermissions(node.AccessRole, filteredServers[i].AccessRole)
 
-		if includeStatus && canReadGameServerConsole(filteredServers[i].AccessRole) {
+		if includeStatus && canViewGameServer(filteredServers[i].AccessRole) {
 			resolvedState, resolvedOutput, resolveErr := s.workerStackStatus(r.Context(), baseURL, apiKey, filteredServers[i].StackName)
 			state = resolvedState
 			output = resolvedOutput
@@ -597,7 +597,7 @@ func (s *Server) handleGetGameServer(w http.ResponseWriter, r *http.Request) {
 	statusErr := ""
 	imageUpdateAvailable := false
 	imageStatusErr := ""
-	includeStatus := includeStatusRequested(r) && canReadGameServerConsole(serverRole)
+	includeStatus := includeStatusRequested(r) && canViewGameServer(serverRole)
 	includeImageStatus := includeImageStatusRequested(r)
 	if includeStatus || includeImageStatus {
 		baseURL, apiKey, err := s.workerTargetFromNode(node)
@@ -2221,7 +2221,7 @@ func (s *Server) applyVelocityBackendProxySettings(
 
 	normalizedSoftware := strings.ToUpper(strings.TrimSpace(softwareVersion))
 	needsPaperConfig := normalizedSoftware == "PAPER" || normalizedSoftware == "PURPUR"
-	needsSpigotConfig := normalizedSoftware == "SPIGOT"
+	needsSpigotConfig := normalizedSoftware == "SPIGOT" || normalizedSoftware == "BUKKIT"
 
 	paperConfigPath := path.Join(rootPath, backendPaperGlobalRelative)
 	paperContent, paperMissing, err := s.workerReadFileOptional(ctx, baseURL, apiKey, paperConfigPath)
@@ -2662,8 +2662,37 @@ func (s *Server) workerStackAction(ctx context.Context, baseURL *url.URL, apiKey
 	return output, nil
 }
 
+type stackImageStatusServiceResponse struct {
+	UpdateAvailable       bool `json:"updateAvailable"`
+	UpdateAvailableLegacy bool `json:"update_available"`
+}
+
 type stackImageStatusResponse struct {
-	UpdateAvailable bool `json:"updateAvailable"`
+	UpdateAvailable       bool                              `json:"updateAvailable"`
+	UpdateAvailableLegacy bool                              `json:"update_available"`
+	Services              []stackImageStatusServiceResponse `json:"services"`
+}
+
+func parseWorkerImageStatus(body []byte) (bool, error) {
+	var rawBool bool
+	if err := json.Unmarshal(body, &rawBool); err == nil {
+		return rawBool, nil
+	}
+
+	var statusResp stackImageStatusResponse
+	if err := json.Unmarshal(body, &statusResp); err != nil {
+		return false, fmt.Errorf("failed to parse worker stack image status response: %w", err)
+	}
+
+	if statusResp.UpdateAvailable || statusResp.UpdateAvailableLegacy {
+		return true, nil
+	}
+	for i := range statusResp.Services {
+		if statusResp.Services[i].UpdateAvailable || statusResp.Services[i].UpdateAvailableLegacy {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Server) workerStackImageStatus(ctx context.Context, baseURL *url.URL, apiKey, stackName string) (bool, error) {
@@ -2678,11 +2707,11 @@ func (s *Server) workerStackImageStatus(ctx context.Context, baseURL *url.URL, a
 		return false, fmt.Errorf("worker stack image status failed (%d): %s", statusCode, output)
 	}
 
-	var statusResp stackImageStatusResponse
-	if err := json.Unmarshal(body, &statusResp); err != nil {
-		return false, fmt.Errorf("failed to parse worker stack image status response: %w", err)
+	updateAvailable, err := parseWorkerImageStatus(body)
+	if err != nil {
+		return false, err
 	}
-	return statusResp.UpdateAvailable, nil
+	return updateAvailable, nil
 }
 
 func (s *Server) workerStackStatus(ctx context.Context, baseURL *url.URL, apiKey, stackName string) (string, string, error) {

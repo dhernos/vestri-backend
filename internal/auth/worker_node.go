@@ -39,7 +39,6 @@ type WorkerNodeInvite struct {
 	InviterMail string
 	Email       string
 	Permission  string
-	Token       string
 	ExpiresAt   time.Time
 	AcceptedAt  *time.Time
 	CreatedAt   time.Time
@@ -200,8 +199,6 @@ func (r *UserRepository) CreateWorkerNodeInvite(ctx context.Context, nodeID, inv
 	defer tx.Rollback(ctx)
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
-	token := strings.ReplaceAll(uuid.NewString(), "-", "")
-
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM "WorkerNodeInvite"
 		WHERE "nodeId"=$1
@@ -214,10 +211,10 @@ func (r *UserRepository) CreateWorkerNodeInvite(ctx context.Context, nodeID, inv
 	id := uuid.NewString()
 	row := tx.QueryRow(ctx, `
 		INSERT INTO "WorkerNodeInvite"
-		("id","nodeId","inviterUserId","email","permission","token","expiresAt")
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
-		RETURNING "id","nodeId","inviterUserId","email","permission","token","expiresAt","acceptedAt","createdAt","updatedAt"
-	`, id, nodeID, inviterUserID, normalizedEmail, permission, token, expiresAt)
+		("id","nodeId","inviterUserId","email","permission","expiresAt")
+		VALUES ($1,$2,$3,$4,$5,$6)
+		RETURNING "id","nodeId","inviterUserId","email","permission","expiresAt","acceptedAt","createdAt","updatedAt"
+	`, id, nodeID, inviterUserID, normalizedEmail, permission, expiresAt)
 
 	invite, err := scanWorkerNodeInvite(row)
 	if err != nil {
@@ -241,7 +238,6 @@ func (r *UserRepository) ListPendingWorkerNodeInvitesForNode(ctx context.Context
 			u."email",
 			i."email",
 			i."permission",
-			i."token",
 			i."expiresAt",
 			i."acceptedAt",
 			i."createdAt",
@@ -282,7 +278,6 @@ func (r *UserRepository) ListIncomingWorkerNodeInvites(ctx context.Context, emai
 			u."email",
 			i."email",
 			i."permission",
-			i."token",
 			i."expiresAt",
 			i."acceptedAt",
 			i."createdAt",
@@ -499,7 +494,6 @@ func scanWorkerNodeInvite(row pgx.Row) (*WorkerNodeInvite, error) {
 		&invite.InviterUser,
 		&invite.Email,
 		&invite.Permission,
-		&invite.Token,
 		&invite.ExpiresAt,
 		&acceptedAt,
 		&invite.CreatedAt,
@@ -527,7 +521,6 @@ func scanWorkerNodeInviteWithNode(row pgx.Row) (*WorkerNodeInvite, error) {
 		&invite.InviterMail,
 		&invite.Email,
 		&invite.Permission,
-		&invite.Token,
 		&invite.ExpiresAt,
 		&acceptedAt,
 		&invite.CreatedAt,

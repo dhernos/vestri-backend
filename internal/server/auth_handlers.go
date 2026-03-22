@@ -93,6 +93,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.RateLimiter.ResetRegisterAttempts(ctx, req.Email, ip)
 
 	emailVerificationRequired := !s.Config.NoEmailVerify
 	message := "Registration successful! Please check your email to verify your account."
@@ -175,13 +176,14 @@ func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 	locale := i18n.LocaleFromRequest(r)
+	ip := clientIP(r, s.trustedProxies)
 	emailKey := strings.ToLower(req.Email)
 	cooldownKey := fmt.Sprintf("resend_cooldown:%s", emailKey)
 	if ttl := s.RateLimiter.CooldownTTL(ctx, cooldownKey); ttl > 0 {
 		writeJSON(w, http.StatusTooManyRequests, map[string]int64{"cooldown": int64(ttl.Seconds())})
 		return
 	}
-	if locked, ttl, err := s.RateLimiter.RegisterRegisterAttempt(ctx, req.Email, clientIP(r, s.trustedProxies)); err != nil {
+	if locked, ttl, err := s.RateLimiter.RegisterRegisterAttempt(ctx, req.Email, ip); err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to process request")
 		return
 	} else if locked {
@@ -205,6 +207,7 @@ func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request
 		}
 	}
 	s.RateLimiter.SetCooldown(ctx, cooldownKey, auth.EmailCooldown)
+	s.RateLimiter.ResetRegisterAttempts(ctx, req.Email, ip)
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "If the account exists, a verification code has been sent."})
 }

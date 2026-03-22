@@ -147,9 +147,7 @@ func (s *Server) handleUpdateEmail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if needStepUp && !s.requireStepUp(r.Context(), sess, "email_change") {
-		if user.TwoFactorMethod != nil && *user.TwoFactorMethod == "email" {
-			_ = s.sendTwoFactorEmail(r.Context(), user, locale)
-		}
+		s.triggerStepUpChallenge(r, user)
 		writeError(w, http.StatusForbidden, "STEP_UP_REQUIRED")
 		return
 	}
@@ -241,10 +239,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if needStepUp && !s.requireStepUp(r.Context(), sess, "password_change") {
-		if user.TwoFactorMethod != nil && *user.TwoFactorMethod == "email" {
-			locale := i18n.LocaleFromRequest(r)
-			_ = s.sendTwoFactorEmail(r.Context(), user, locale)
-		}
+		s.triggerStepUpChallenge(r, user)
 		writeError(w, http.StatusForbidden, "STEP_UP_REQUIRED")
 		return
 	}
@@ -385,17 +380,8 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	needStepUp := user.TwoFactorEnabled
-	if !needStepUp {
-		if passkeys, _ := s.Users.ListPasskeys(r.Context(), user.ID); len(passkeys) > 0 {
-			needStepUp = true
-		}
-	}
-	if needStepUp && !s.requireStepUp(r.Context(), sess, "account_delete") {
-		if user.TwoFactorMethod != nil && *user.TwoFactorMethod == "email" {
-			locale := i18n.LocaleFromRequest(r)
-			_ = s.sendTwoFactorEmail(r.Context(), user, locale)
-		}
+	if !s.requireStepUp(r.Context(), sess, "account_delete") {
+		s.triggerStepUpChallenge(r, user)
 		writeError(w, http.StatusForbidden, "STEP_UP_REQUIRED")
 		return
 	}

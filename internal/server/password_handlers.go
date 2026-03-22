@@ -86,6 +86,7 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RateLimiter.SetCooldown(ctx, cooldownKey, auth.EmailCooldown)
+	s.RateLimiter.ResetResetAttempts(ctx, req.Email, ip)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "If the email address exists, a password reset email has been sent with instructions.",

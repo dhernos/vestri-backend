@@ -29,7 +29,6 @@ type GameServerInvite struct {
 	InviterMail string
 	Email       string
 	Permission  string
-	Token       string
 	ExpiresAt   time.Time
 	AcceptedAt  *time.Time
 	CreatedAt   time.Time
@@ -160,8 +159,6 @@ func (r *UserRepository) CreateGameServerInvite(ctx context.Context, serverID, i
 	defer tx.Rollback(ctx)
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
-	token := strings.ReplaceAll(uuid.NewString(), "-", "")
-
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM "GameServerInvite"
 		WHERE "serverId"=$1
@@ -174,10 +171,10 @@ func (r *UserRepository) CreateGameServerInvite(ctx context.Context, serverID, i
 	id := uuid.NewString()
 	row := tx.QueryRow(ctx, `
 		INSERT INTO "GameServerInvite"
-		("id","serverId","inviterUserId","email","permission","token","expiresAt")
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
-		RETURNING "id","serverId","inviterUserId","email","permission","token","expiresAt","acceptedAt","createdAt","updatedAt"
-	`, id, serverID, inviterUserID, normalizedEmail, permission, token, expiresAt)
+		("id","serverId","inviterUserId","email","permission","expiresAt")
+		VALUES ($1,$2,$3,$4,$5,$6)
+		RETURNING "id","serverId","inviterUserId","email","permission","expiresAt","acceptedAt","createdAt","updatedAt"
+	`, id, serverID, inviterUserID, normalizedEmail, permission, expiresAt)
 
 	invite, err := scanGameServerInvite(row)
 	if err != nil {
@@ -204,7 +201,6 @@ func (r *UserRepository) ListPendingGameServerInvitesForServer(ctx context.Conte
 			u."email",
 			i."email",
 			i."permission",
-			i."token",
 			i."expiresAt",
 			i."acceptedAt",
 			i."createdAt",
@@ -249,7 +245,6 @@ func (r *UserRepository) ListIncomingGameServerInvites(ctx context.Context, emai
 			u."email",
 			i."email",
 			i."permission",
-			i."token",
 			i."expiresAt",
 			i."acceptedAt",
 			i."createdAt",
@@ -379,7 +374,6 @@ func (r *UserRepository) AcceptGameServerInvite(ctx context.Context, inviteID, u
 			u."email",
 			i."email",
 			i."permission",
-			i."token",
 			i."expiresAt",
 			i."acceptedAt",
 			i."createdAt",
@@ -404,7 +398,6 @@ func (r *UserRepository) AcceptGameServerInvite(ctx context.Context, inviteID, u
 		&invite.InviterMail,
 		&invite.Email,
 		&invite.Permission,
-		&invite.Token,
 		&invite.ExpiresAt,
 		&acceptedAt,
 		&invite.CreatedAt,
@@ -495,7 +488,6 @@ func scanGameServerInvite(row pgx.Row) (*GameServerInvite, error) {
 		&invite.InviterUser,
 		&invite.Email,
 		&invite.Permission,
-		&invite.Token,
 		&invite.ExpiresAt,
 		&acceptedAt,
 		&invite.CreatedAt,
@@ -526,7 +518,6 @@ func scanGameServerInviteWithNodeAndServer(row pgx.Row) (*GameServerInvite, erro
 		&invite.InviterMail,
 		&invite.Email,
 		&invite.Permission,
-		&invite.Token,
 		&invite.ExpiresAt,
 		&acceptedAt,
 		&invite.CreatedAt,

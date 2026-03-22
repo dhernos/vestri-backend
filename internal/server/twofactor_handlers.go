@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"yourapp/internal/auth"
@@ -158,10 +160,7 @@ func (s *Server) handleTwoFactorDisable(w http.ResponseWriter, r *http.Request) 
 	verified := s.requireStepUp(r.Context(), sess, "disable_2fa")
 	if !verified {
 		if req.TOTPCode == "" {
-			if user.TwoFactorMethod != nil && *user.TwoFactorMethod == "email" {
-				locale := i18n.LocaleFromRequest(r)
-				_ = s.sendTwoFactorEmail(r.Context(), user, locale)
-			}
+			s.triggerStepUpChallenge(r, user)
 			writeError(w, http.StatusForbidden, "STEP_UP_REQUIRED")
 			return
 		}
@@ -194,8 +193,8 @@ func (s *Server) handleTwoFactorStepUp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if req.Code == "" || req.Purpose == "" {
-		writeError(w, http.StatusBadRequest, "Code and purpose are required.")
+	if req.Purpose == "" {
+		writeError(w, http.StatusBadRequest, "Purpose is required.")
 		return
 	}
 	if !allowedStepUpPurposes[req.Purpose] {
@@ -215,8 +214,22 @@ func (s *Server) handleTwoFactorStepUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.verifyTwoFactor(r.Context(), user, req.Code) {
-		writeError(w, http.StatusForbidden, "Invalid or expired 2FA code.")
+	if s.requireStepUp(r.Context(), sess, req.Purpose) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"success": "true",
+			"purpose": req.Purpose,
+		})
+		return
+	}
+
+	if strings.TrimSpace(req.Code) == "" {
+		s.triggerStepUpChallenge(r, user)
+		writeError(w, http.StatusForbidden, "STEP_UP_REQUIRED")
+		return
+	}
+
+	if !s.verifyStepUpCode(r.Context(), user, req.Code) {
+		writeError(w, http.StatusForbidden, "INVALID_OR_EXPIRED_CODE")
 		return
 	}
 
@@ -230,4 +243,24 @@ func (s *Server) handleTwoFactorStepUp(w http.ResponseWriter, r *http.Request) {
 		"success": "true",
 		"purpose": req.Purpose,
 	})
+}
+
+func (s *Server) verifyStepUpCode(ctx context.Context, user *auth.User, code string) bool {
+	if user == nil {
+		return false
+	}
+	if user.TwoFactorMethod != nil && *user.TwoFactorMethod == "app" {
+		return s.verifyTwoFactor(ctx, user, code)
+	}
+	if user.TwoFactorEmailCode == nil || user.TwoFactorCodeExpires == nil {
+		return false
+	}
+	if user.TwoFactorCodeExpires.Before(time.Now()) {
+		return false
+	}
+	if auth.HashString(code) != *user.TwoFactorEmailCode {
+		return false
+	}
+	_ = s.Users.ClearEmailCode(ctx, user.ID)
+	return true
 }

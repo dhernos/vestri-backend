@@ -32,6 +32,9 @@ const (
 	minecraftSoftwareVanilla  = "VANILLA"
 	minecraftSoftwarePaper    = "PAPER"
 	minecraftSoftwarePurpur   = "PURPUR"
+	minecraftSoftwareSpigot   = "SPIGOT"
+	minecraftSoftwareBukkit   = "BUKKIT"
+	minecraftSoftwareFabric   = "FABRIC"
 	minecraftSoftwareVelocity = "VELOCITY"
 )
 
@@ -39,7 +42,11 @@ const (
 	mojangVersionManifestURL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 	paperVersionsURL         = "https://api.papermc.io/v2/projects/paper"
 	purpurVersionsURL        = "https://api.purpurmc.org/v2/purpur"
+	fabricGameVersionsURL    = "https://meta.fabricmc.net/v2/versions/game"
+	fabricInstallerURL       = "https://meta.fabricmc.net/v2/versions/installer"
 	velocityVersionsURL      = "https://api.papermc.io/v2/projects/velocity"
+	spigotDownloadBaseURL    = "https://download.getbukkit.org/spigot"
+	bukkitDownloadBaseURL    = "https://download.getbukkit.org/craftbukkit"
 )
 
 var (
@@ -179,6 +186,12 @@ func normalizeMinecraftSoftware(value string) string {
 		return minecraftSoftwarePaper
 	case minecraftSoftwarePurpur:
 		return minecraftSoftwarePurpur
+	case minecraftSoftwareSpigot:
+		return minecraftSoftwareSpigot
+	case minecraftSoftwareBukkit:
+		return minecraftSoftwareBukkit
+	case minecraftSoftwareFabric:
+		return minecraftSoftwareFabric
 	case minecraftSoftwareVelocity:
 		return minecraftSoftwareVelocity
 	default:
@@ -200,6 +213,12 @@ func listMinecraftVersionsForSoftware(ctx context.Context, software string) ([]s
 			return fetchPaperReleaseVersions(fetchCtx)
 		case minecraftSoftwarePurpur:
 			return fetchPurpurReleaseVersions(fetchCtx)
+		case minecraftSoftwareSpigot:
+			return fetchSpigotReleaseVersions(fetchCtx)
+		case minecraftSoftwareBukkit:
+			return fetchBukkitReleaseVersions(fetchCtx)
+		case minecraftSoftwareFabric:
+			return fetchFabricReleaseVersions(fetchCtx)
 		case minecraftSoftwareVelocity:
 			return fetchVelocityReleaseVersions(fetchCtx)
 		default:
@@ -380,6 +399,34 @@ func fetchPurpurReleaseVersions(ctx context.Context) ([]string, error) {
 	return normalizeMinecraftVersionList(payload.Versions), nil
 }
 
+func fetchSpigotReleaseVersions(ctx context.Context) ([]string, error) {
+	return fetchPaperReleaseVersions(ctx)
+}
+
+func fetchBukkitReleaseVersions(ctx context.Context) ([]string, error) {
+	return fetchPaperReleaseVersions(ctx)
+}
+
+type fabricGameVersionsResponseItem struct {
+	Version string `json:"version"`
+	Stable  bool   `json:"stable"`
+}
+
+func fetchFabricReleaseVersions(ctx context.Context) ([]string, error) {
+	var payload []fabricGameVersionsResponseItem
+	if err := fetchExternalJSON(ctx, fabricGameVersionsURL, &payload); err != nil {
+		return nil, err
+	}
+	versions := make([]string, 0, len(payload))
+	for _, item := range payload {
+		if !item.Stable {
+			continue
+		}
+		versions = append(versions, item.Version)
+	}
+	return normalizeMinecraftVersionList(versions), nil
+}
+
 func fetchVelocityReleaseVersions(ctx context.Context) ([]string, error) {
 	var payload paperProjectVersionsResponse
 	if err := fetchExternalJSON(ctx, velocityVersionsURL, &payload); err != nil {
@@ -431,6 +478,12 @@ func resolveMinecraftServerArtifact(
 		return resolvePaperServerArtifact(ctx, requestedGameVersion)
 	case minecraftSoftwarePurpur:
 		return resolvePurpurServerArtifact(ctx, requestedGameVersion)
+	case minecraftSoftwareSpigot:
+		return resolveSpigotServerArtifact(ctx, requestedGameVersion)
+	case minecraftSoftwareBukkit:
+		return resolveBukkitServerArtifact(ctx, requestedGameVersion)
+	case minecraftSoftwareFabric:
+		return resolveFabricServerArtifact(ctx, requestedGameVersion)
 	case minecraftSoftwareVelocity:
 		return resolveVelocityServerArtifact(ctx, requestedGameVersion)
 	default:
@@ -611,6 +664,146 @@ func resolvePurpurServerArtifact(ctx context.Context, requestedVersion string) (
 		DownloadURL: downloadURL,
 		FileName:    fmt.Sprintf("purpur-%s.jar", version),
 	}, nil
+}
+
+func resolveSpigotServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+	version := strings.TrimSpace(requestedVersion)
+	if version == "" || strings.EqualFold(version, "LATEST") {
+		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwareSpigot)
+		if err != nil {
+			return nil, err
+		}
+		if len(versions) == 0 {
+			return nil, fmt.Errorf("no spigot versions are available")
+		}
+		version = versions[0]
+	}
+	if !isStableMinecraftVersion(version) {
+		return nil, fmt.Errorf("spigot version %q is invalid", version)
+	}
+
+	downloadURL := fmt.Sprintf("%s/spigot-%s.jar", spigotDownloadBaseURL, url.PathEscape(version))
+	return &minecraftServerArtifact{
+		Software:    minecraftSoftwareSpigot,
+		Version:     version,
+		DownloadURL: downloadURL,
+		FileName:    fmt.Sprintf("spigot-%s.jar", version),
+	}, nil
+}
+
+func resolveBukkitServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+	version := strings.TrimSpace(requestedVersion)
+	if version == "" || strings.EqualFold(version, "LATEST") {
+		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwareBukkit)
+		if err != nil {
+			return nil, err
+		}
+		if len(versions) == 0 {
+			return nil, fmt.Errorf("no bukkit versions are available")
+		}
+		version = versions[0]
+	}
+	if !isStableMinecraftVersion(version) {
+		return nil, fmt.Errorf("bukkit version %q is invalid", version)
+	}
+
+	downloadURL := fmt.Sprintf("%s/craftbukkit-%s.jar", bukkitDownloadBaseURL, url.PathEscape(version))
+	return &minecraftServerArtifact{
+		Software:    minecraftSoftwareBukkit,
+		Version:     version,
+		DownloadURL: downloadURL,
+		FileName:    fmt.Sprintf("craftbukkit-%s.jar", version),
+	}, nil
+}
+
+type fabricLoaderVersionsResponseItem struct {
+	Loader struct {
+		Version string `json:"version"`
+	} `json:"loader"`
+}
+
+type fabricInstallerVersionsResponseItem struct {
+	Version string `json:"version"`
+	Stable  bool   `json:"stable"`
+}
+
+func resolveFabricServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+	version := strings.TrimSpace(requestedVersion)
+	if version == "" || strings.EqualFold(version, "LATEST") {
+		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwareFabric)
+		if err != nil {
+			return nil, err
+		}
+		if len(versions) == 0 {
+			return nil, fmt.Errorf("no fabric versions are available")
+		}
+		version = versions[0]
+	}
+	if !isStableMinecraftVersion(version) {
+		return nil, fmt.Errorf("fabric version %q is invalid", version)
+	}
+
+	loaderVersion, err := fetchLatestFabricLoaderVersion(ctx, version)
+	if err != nil {
+		return nil, err
+	}
+	installerVersion, err := fetchLatestFabricInstallerVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	downloadURL := fmt.Sprintf(
+		"https://meta.fabricmc.net/v2/versions/loader/%s/%s/%s/server/jar",
+		url.PathEscape(version),
+		url.PathEscape(loaderVersion),
+		url.PathEscape(installerVersion),
+	)
+	return &minecraftServerArtifact{
+		Software:    minecraftSoftwareFabric,
+		Version:     version,
+		DownloadURL: downloadURL,
+		FileName:    fmt.Sprintf("fabric-%s-loader-%s.jar", version, loaderVersion),
+	}, nil
+}
+
+func fetchLatestFabricLoaderVersion(ctx context.Context, gameVersion string) (string, error) {
+	endpoint := fmt.Sprintf("https://meta.fabricmc.net/v2/versions/loader/%s", url.PathEscape(gameVersion))
+	var payload []fabricLoaderVersionsResponseItem
+	if err := fetchExternalJSON(ctx, endpoint, &payload); err != nil {
+		return "", err
+	}
+	for _, item := range payload {
+		version := strings.TrimSpace(item.Loader.Version)
+		if version == "" {
+			continue
+		}
+		return version, nil
+	}
+	return "", fmt.Errorf("fabric game version %s has no loader versions", gameVersion)
+}
+
+func fetchLatestFabricInstallerVersion(ctx context.Context) (string, error) {
+	var payload []fabricInstallerVersionsResponseItem
+	if err := fetchExternalJSON(ctx, fabricInstallerURL, &payload); err != nil {
+		return "", err
+	}
+	var fallback string
+	for _, item := range payload {
+		version := strings.TrimSpace(item.Version)
+		if version == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = version
+		}
+		if item.Stable {
+			return version, nil
+		}
+	}
+	if fallback != "" {
+		return fallback, nil
+	}
+	return "", fmt.Errorf("no fabric installer versions are available")
 }
 
 func resolveVelocityServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {

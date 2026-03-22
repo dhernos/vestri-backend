@@ -161,6 +161,15 @@ func (r *RateLimiter) RegisterResetAttempt(ctx context.Context, email, ip string
 	return locked, ttlMax, nil
 }
 
+func (r *RateLimiter) ResetResetAttempts(ctx context.Context, email, ip string) {
+	keys := []string{r.resetAttemptEmailKey(email), r.resetAttemptIPKey(ip)}
+	for _, key := range keys {
+		if key != "" {
+			r.Redis.Del(ctx, key)
+		}
+	}
+}
+
 func (r *RateLimiter) RegisterRegisterAttempt(ctx context.Context, email, ip string) (bool, time.Duration, error) {
 	keys := []struct {
 		key       string
@@ -194,6 +203,15 @@ func (r *RateLimiter) RegisterRegisterAttempt(ctx context.Context, email, ip str
 	}
 
 	return locked, ttlMax, nil
+}
+
+func (r *RateLimiter) ResetRegisterAttempts(ctx context.Context, email, ip string) {
+	keys := []string{r.registerAttemptEmailKey(email), r.registerAttemptIPKey(ip)}
+	for _, key := range keys {
+		if key != "" {
+			r.Redis.Del(ctx, key)
+		}
+	}
 }
 
 func (r *RateLimiter) CooldownTTL(ctx context.Context, key string) time.Duration {

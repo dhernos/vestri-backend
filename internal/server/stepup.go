@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"yourapp/internal/auth"
+	"yourapp/internal/i18n"
 )
 
 var allowedStepUpPurposes = map[string]bool{
@@ -47,4 +49,16 @@ func (s *Server) recordStepUp(ctx context.Context, sessionID, purpose string, tt
 	}
 	s.Redis.HSet(ctx, key, data)
 	s.Redis.Expire(ctx, key, ttl)
+}
+
+func (s *Server) triggerStepUpChallenge(r *http.Request, user *auth.User) {
+	if user == nil {
+		return
+	}
+	if user.TwoFactorMethod != nil && *user.TwoFactorMethod == "app" {
+		// App-based 2FA requires an authenticator code; no email fallback.
+		return
+	}
+	locale := i18n.LocaleFromRequest(r)
+	_ = s.sendTwoFactorEmail(r.Context(), user, locale)
 }
