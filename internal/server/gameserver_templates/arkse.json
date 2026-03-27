@@ -1,0 +1,31 @@
+{
+  "id": "arkse-dedicated",
+  "name": "Ark Suvival Evolved Dedicated Server",
+  "description": "Dedicated Ark Suvival Evolved server powered by TheFlameBe/arkse-dedicatedserver.",
+  "game": "Ark Suvival Evolved",
+  "templateVersion": "1",
+  "agreement": {
+    "required": true,
+    "title": "Ark EULA",
+    "text": "You must accept the Ark Survival Evolved EULA before creating this server.",
+    "linkText": "Open Studio Wildcards legal page",
+    "linkUrl": "https://playark.com/ark-survival-evolved-terms-of-use/"
+  },
+  "versionConfig": {
+    "software": {
+      "label": "Release channel",
+      "defaultValue": "public",
+      "options": ["public", "preaquatica"]
+    }
+  },
+  "composeInline": "version: \"3.9\"\n\nservices:\n  ark:\n    image: arkse-dedicatedserver:latest\n    container_name: vestri-{{SERVER_SLUG}}\n\n    restart: unless-stopped\n\n    ports:\n      - \"7777:7777/udp\"     # Game Port\n      - \"7778:7778/udp\"     # Raw UDP (ARK requirement)\n      - \"27015:27015/udp\"   # Steam Query\n    #  - \"27020:27020/tcp\"   # RCON (optional)\n\n    environment:\n      # ===== Server =====\n      SESSION_NAME: \"DinoWorld\"\n      MAP_NAME: \"TheIsland\"\n      MAX_PLAYERS: 20\n\n      # ===== Passwords =====\n      SERVER_PASSWORD: \"\"\n      ADMIN_PASSWORD: \"\"\n\n      # ===== Ports =====\n      GAME_PORT: 7777\n      QUERY_PORT: 27015\n      #RCON_PORT: 27020\n\n      # ===== Steam =====\n      STEAM_BETA: \\\"{{SERVER_SOFTWARE}}\\\"\\n\n      STEAM_BETA_PASS: \"\"\n\n      # ===== Updates =====\n      FORCE_UPDATE: \"false\" \n      # Optional timezone\n      TZ: \"Europe/Berlin\"\n\n    volumes:\n      - ./data:/ark\n\n    stop_grace_period: 2m\n    stdin_open: true    \n    tty: true\n\n    healthcheck:\n      test: [\"CMD\", \"/healthcheck.sh\"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n      start_period: 2m\n\n    logging:\n      driver: \"json-file\"\n      options:\n        max-size: \"50m\"\n        max-file: \"3\"\n",
+  "configFiles": [
+    {
+      "id": "server-settings",
+      "title": "ServerSettings.ini",
+      "path": "data/FactoryGame/Saved/Config/LinuxServer/ServerSettings.ini",
+      "format": "ini",
+      "defaultContent": "[/Script/FactoryGame.FGServerSettings]\nServerName={{SERVER_NAME}}\n"
+    }
+  ]
+}
