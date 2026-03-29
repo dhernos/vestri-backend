@@ -20,6 +20,7 @@ type gameServerTemplate struct {
 	Name            string                         `json:"name"`
 	Description     string                         `json:"description"`
 	Game            string                         `json:"game"`
+	Kind            string                         `json:"kind,omitempty"`
 	TemplateVersion string                         `json:"templateVersion"`
 	ComposeInline   string                         `json:"composeInline,omitempty"`
 	ComposeURL      string                         `json:"composeUrl,omitempty"`
@@ -165,6 +166,7 @@ func normalizeGameServerTemplate(tpl *gameServerTemplate) error {
 	tpl.Name = strings.TrimSpace(tpl.Name)
 	tpl.Description = strings.TrimSpace(tpl.Description)
 	tpl.Game = strings.TrimSpace(tpl.Game)
+	tpl.Kind = strings.TrimSpace(strings.ToLower(tpl.Kind))
 	tpl.TemplateVersion = strings.TrimSpace(tpl.TemplateVersion)
 	tpl.ComposeInline = strings.TrimSpace(tpl.ComposeInline)
 	tpl.ComposeURL = strings.TrimSpace(tpl.ComposeURL)
@@ -177,6 +179,14 @@ func normalizeGameServerTemplate(tpl *gameServerTemplate) error {
 	}
 	if tpl.TemplateVersion == "" {
 		tpl.TemplateVersion = "1"
+	}
+	switch tpl.Kind {
+	case "", gameServerKindStandalone:
+		tpl.Kind = gameServerKindStandalone
+	case gameServerKindVelocity:
+		// Allowed.
+	default:
+		return fmt.Errorf("invalid template kind: %s", tpl.Kind)
 	}
 	if tpl.ComposeInline == "" && tpl.ComposeURL == "" {
 		return fmt.Errorf("composeInline or composeUrl is required")

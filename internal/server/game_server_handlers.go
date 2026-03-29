@@ -24,7 +24,6 @@ import (
 const (
 	maxWorkerResponseBytes = 8 << 20
 	maxRemoteComposeBytes  = 2 << 20
-	velocityTemplateID     = "minecraft-velocity"
 	vanillaTemplateID      = "minecraft-vanilla"
 	defaultVelocityPort    = 25577
 	defaultMinecraftPort   = 25565
@@ -59,6 +58,7 @@ type gameServerTemplateResponse struct {
 	Name            string                         `json:"name"`
 	Description     string                         `json:"description"`
 	Game            string                         `json:"game"`
+	Kind            string                         `json:"kind,omitempty"`
 	TemplateVersion string                         `json:"templateVersion"`
 	ConfigFiles     []gameServerConfigFileResponse `json:"configFiles"`
 	Agreement       *gameServerTemplateAgreement   `json:"agreement,omitempty"`
@@ -127,6 +127,7 @@ func (s *Server) handleListGameServerTemplates(w http.ResponseWriter, r *http.Re
 			Name:            enrichedTemplate.Name,
 			Description:     enrichedTemplate.Description,
 			Game:            enrichedTemplate.Game,
+			Kind:            enrichedTemplate.Kind,
 			TemplateVersion: enrichedTemplate.TemplateVersion,
 			ConfigFiles:     configFilesToResponse(enrichedTemplate.ConfigFiles),
 			Agreement:       enrichedTemplate.Agreement,
@@ -314,7 +315,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	var minecraftArtifact *minecraftServerArtifact
 	if shouldProvisionMinecraftArtifact {
 		normalizedSoftware := normalizeMinecraftSoftware(softwareVersion)
-		if isVelocityTemplateID(template.ID) {
+		if isVelocityTemplate(template) {
 			normalizedSoftware = minecraftSoftwareVelocity
 		}
 		if normalizedSoftware == "" {
@@ -429,6 +430,10 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := validateVelocityBackendSoftware(softwareVersion); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if strings.EqualFold(strings.TrimSpace(softwareVersion), minecraftSoftwareVelocity) {
 			writeError(w, http.StatusBadRequest, "Velocity software cannot be used for backend servers")
 			return
@@ -458,7 +463,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		backendConnectHost = connectHost
 		backendConnectPort = defaultMinecraftPort
 	} else {
-		if isVelocityTemplateID(template.ID) {
+		if isVelocityTemplate(template) {
 			velocityNetwork := velocityNetworkName(slug)
 			renderValues["VELOCITY_NETWORK"] = velocityNetwork
 			forwardingSecret, secretErr := generateForwardingSecret()
@@ -472,7 +477,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			metadata.ConnectPort = defaultVelocityPort
 		}
 
-		if isVelocityTemplateID(template.ID) {
+		if isVelocityTemplate(template) {
 			composeContent, err = buildVelocityStandaloneCompose(r.Context(), composeTemplate, renderValues)
 		} else {
 			composeContent, err = resolveTemplateCompose(r.Context(), composeTemplate, renderValues)
@@ -1002,8 +1007,19 @@ func inferGameServerKind(srv *auth.GameServer, metadata gameServerStoredMetadata
 	return gameServerKindStandalone
 }
 
+func isVelocityTemplate(template *gameServerTemplate) bool {
+	if template == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(template.Kind), gameServerKindVelocity)
+}
+
 func isVelocityTemplateID(templateID string) bool {
-	return strings.EqualFold(strings.TrimSpace(templateID), velocityTemplateID)
+	tpl, err := gameServerTemplateByID(templateID)
+	if err != nil || tpl == nil {
+		return false
+	}
+	return isVelocityTemplate(tpl)
 }
 
 func isVelocityServer(server *auth.GameServer) bool {
@@ -1025,17 +1041,30 @@ func validateVelocityBackendTemplate(template *gameServerTemplate) error {
 	if strings.TrimSpace(strings.ToLower(template.Game)) != "minecraft" {
 		return fmt.Errorf("velocity backend servers currently support minecraft templates only")
 	}
-	if isVelocityTemplateID(template.ID) {
+	if isVelocityTemplate(template) {
 		return fmt.Errorf("velocity servers cannot be attached as velocity backend servers")
-	}
-	if !strings.EqualFold(strings.TrimSpace(template.ID), vanillaTemplateID) {
-		return fmt.Errorf("velocity backend servers currently support the minecraft-vanilla template only")
 	}
 	return nil
 }
 
+func supportsVelocityBackendSoftware(softwareVersion string) bool {
+	switch normalizeMinecraftSoftware(softwareVersion) {
+	case minecraftSoftwarePaper, minecraftSoftwarePurpur, minecraftSoftwareSpigot, minecraftSoftwareBukkit:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateVelocityBackendSoftware(softwareVersion string) error {
+	if supportsVelocityBackendSoftware(softwareVersion) {
+		return nil
+	}
+	return fmt.Errorf("velocity backend auto-configuration currently supports PAPER, PURPUR, SPIGOT, and BUKKIT only")
+}
+
 func defaultMinecraftSoftwareForTemplate(template *gameServerTemplate) string {
-	if template != nil && isVelocityTemplateID(template.ID) {
+	if isVelocityTemplate(template) {
 		return minecraftSoftwareVelocity
 	}
 	return minecraftSoftwareVanilla
@@ -1048,7 +1077,7 @@ func resolveMinecraftComposeTemplate(template *gameServerTemplate) (*gameServerT
 	if !strings.EqualFold(strings.TrimSpace(template.Game), "minecraft") {
 		return template, nil
 	}
-	if strings.EqualFold(strings.TrimSpace(template.ID), vanillaTemplateID) {
+	if !isVelocityTemplate(template) {
 		return template, nil
 	}
 

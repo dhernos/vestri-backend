@@ -24,13 +24,13 @@
       "id": "gameini",
       "title": "Game.ini",
       "path": "data/ShooterGame/Saved/Config/LinuxServer/Game.ini",
-      "format": "ini",
+      "format": "ini"
     },
     {
       "id": "gameusersettingsini",
       "title": "GameUserSettings.ini",
       "path": "data/ShooterGame/Saved/Config/LinuxServer/GameUserSettings.ini",
-      "format": "ini",
+      "format": "ini"
     }
   ]
 }

@@ -3,6 +3,7 @@
   "name": "Minecraft Velocity Proxy",
   "description": "Velocity proxy server powered by dhernos/vestri-mc.",
   "game": "minecraft",
+  "kind": "velocity",
   "templateVersion": "1",
   "composeInline": "services:\n  velocity:\n    image: dhernos/vestri-mc:latest\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"25577:25577\"\n    environment:\n      TYPE: \"VELOCITY\"\n    volumes:\n      - ./data:/server\n    stdin_open: true\n    tty: true\n    restart: unless-stopped\n    networks:\n      - velocity\nnetworks:\n  velocity:\n    name: \"{{VELOCITY_NETWORK}}\"\n",
   "configFiles": [

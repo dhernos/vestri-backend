@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,22 +36,32 @@ const (
 	minecraftSoftwareSpigot   = "SPIGOT"
 	minecraftSoftwareBukkit   = "BUKKIT"
 	minecraftSoftwareFabric   = "FABRIC"
+	minecraftSoftwareForge    = "FORGE"
+	minecraftSoftwareNeoForge = "NEOFORGE"
+	minecraftSoftwareSponge   = "SPONGE"
 	minecraftSoftwareVelocity = "VELOCITY"
 )
 
 const (
-	mojangVersionManifestURL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-	paperVersionsURL         = "https://api.papermc.io/v2/projects/paper"
-	purpurVersionsURL        = "https://api.purpurmc.org/v2/purpur"
-	fabricGameVersionsURL    = "https://meta.fabricmc.net/v2/versions/game"
-	fabricInstallerURL       = "https://meta.fabricmc.net/v2/versions/installer"
-	velocityVersionsURL      = "https://api.papermc.io/v2/projects/velocity"
-	spigotDownloadBaseURL    = "https://download.getbukkit.org/spigot"
-	bukkitDownloadBaseURL    = "https://download.getbukkit.org/craftbukkit"
+	mojangVersionManifestURL  = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+	paperVersionsURL          = "https://api.papermc.io/v2/projects/paper"
+	purpurVersionsURL         = "https://api.purpurmc.org/v2/purpur"
+	fabricGameVersionsURL     = "https://meta.fabricmc.net/v2/versions/game"
+	fabricInstallerURL        = "https://meta.fabricmc.net/v2/versions/installer"
+	forgeMavenMetadataURL     = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+	forgeMavenBaseURL         = "https://maven.minecraftforge.net/net/minecraftforge/forge"
+	neoForgeMavenMetadataURL  = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+	neoForgeMavenBaseURL      = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
+	spongeArtifactMetadataURL = "https://dl-api.spongepowered.org/v2/groups/org.spongepowered/artifacts/spongevanilla"
+	spongeVersionsURL         = "https://dl-api.spongepowered.org/v2/groups/org.spongepowered/artifacts/spongevanilla/versions"
+	velocityVersionsURL       = "https://api.papermc.io/v2/projects/velocity"
+	spigotDownloadBaseURL     = "https://download.getbukkit.org/spigot"
+	bukkitDownloadBaseURL     = "https://download.getbukkit.org/craftbukkit"
 )
 
 var (
 	stableMinecraftVersionPattern = regexp.MustCompile(`^\d+\.\d+(\.\d+)?$`)
+	looseVersionTokenPattern      = regexp.MustCompile(`[0-9]+|[A-Za-z]+`)
 	externalAPIFetchClient        = &http.Client{Timeout: 30 * time.Second}
 	minecraftVersionCache         = softwareVersionListCache{
 		entries: make(map[string]softwareVersionListCacheEntry),
@@ -192,6 +203,12 @@ func normalizeMinecraftSoftware(value string) string {
 		return minecraftSoftwareBukkit
 	case minecraftSoftwareFabric:
 		return minecraftSoftwareFabric
+	case minecraftSoftwareForge:
+		return minecraftSoftwareForge
+	case minecraftSoftwareNeoForge:
+		return minecraftSoftwareNeoForge
+	case minecraftSoftwareSponge:
+		return minecraftSoftwareSponge
 	case minecraftSoftwareVelocity:
 		return minecraftSoftwareVelocity
 	default:
@@ -219,6 +236,12 @@ func listMinecraftVersionsForSoftware(ctx context.Context, software string) ([]s
 			return fetchBukkitReleaseVersions(fetchCtx)
 		case minecraftSoftwareFabric:
 			return fetchFabricReleaseVersions(fetchCtx)
+		case minecraftSoftwareForge:
+			return fetchForgeReleaseVersions(fetchCtx)
+		case minecraftSoftwareNeoForge:
+			return fetchNeoForgeReleaseVersions(fetchCtx)
+		case minecraftSoftwareSponge:
+			return fetchSpongeReleaseVersions(fetchCtx)
 		case minecraftSoftwareVelocity:
 			return fetchVelocityReleaseVersions(fetchCtx)
 		default:
@@ -435,6 +458,240 @@ func fetchVelocityReleaseVersions(ctx context.Context) ([]string, error) {
 	return normalizeMinecraftVersionList(payload.Versions), nil
 }
 
+type mavenMetadata struct {
+	Versioning struct {
+		Versions struct {
+			Values []string `xml:"version"`
+		} `xml:"versions"`
+	} `xml:"versioning"`
+}
+
+type spongeArtifactMetadataResponse struct {
+	Tags struct {
+		Minecraft []string `json:"minecraft"`
+	} `json:"tags"`
+}
+
+type spongeVersionListEntry struct {
+	TagValues   map[string]string `json:"tagValues"`
+	Recommended bool              `json:"recommended"`
+}
+
+type spongeVersionsResponse struct {
+	Artifacts map[string]spongeVersionListEntry `json:"artifacts"`
+}
+
+type spongeVersionAsset struct {
+	Classifier  string `json:"classifier"`
+	DownloadURL string `json:"downloadUrl"`
+	Extension   string `json:"extension"`
+}
+
+type spongeVersionDetailsResponse struct {
+	Assets []spongeVersionAsset `json:"assets"`
+}
+
+func fetchMavenMetadataVersions(ctx context.Context, endpoint string) ([]string, error) {
+	var payload mavenMetadata
+	if err := fetchExternalXML(ctx, endpoint, &payload); err != nil {
+		return nil, err
+	}
+	return append([]string(nil), payload.Versioning.Versions.Values...), nil
+}
+
+func fetchForgeReleaseVersions(ctx context.Context) ([]string, error) {
+	fullVersions, err := fetchMavenMetadataVersions(ctx, forgeMavenMetadataURL)
+	if err != nil {
+		return nil, err
+	}
+	versions := make([]string, 0, len(fullVersions))
+	for _, fullVersion := range fullVersions {
+		gameVersion := extractForgeGameVersion(fullVersion)
+		if gameVersion == "" {
+			continue
+		}
+		versions = append(versions, gameVersion)
+	}
+	return normalizeMinecraftVersionList(versions), nil
+}
+
+func fetchNeoForgeReleaseVersions(ctx context.Context) ([]string, error) {
+	fullVersions, err := fetchMavenMetadataVersions(ctx, neoForgeMavenMetadataURL)
+	if err != nil {
+		return nil, err
+	}
+	versions := make([]string, 0, len(fullVersions))
+	for _, fullVersion := range fullVersions {
+		gameVersion := extractNeoForgeGameVersion(fullVersion)
+		if gameVersion == "" {
+			continue
+		}
+		versions = append(versions, gameVersion)
+	}
+	return normalizeMinecraftVersionList(versions), nil
+}
+
+func fetchSpongeReleaseVersions(ctx context.Context) ([]string, error) {
+	var payload spongeArtifactMetadataResponse
+	if err := fetchExternalJSON(ctx, spongeArtifactMetadataURL, &payload); err != nil {
+		return nil, err
+	}
+	return normalizeMinecraftVersionList(payload.Tags.Minecraft), nil
+}
+
+func extractForgeGameVersion(fullVersion string) string {
+	value := strings.TrimSpace(fullVersion)
+	if value == "" {
+		return ""
+	}
+	idx := strings.Index(value, "-")
+	if idx <= 0 {
+		return ""
+	}
+	gameVersion := strings.TrimSpace(value[:idx])
+	if !isStableMinecraftVersion(gameVersion) {
+		return ""
+	}
+	return gameVersion
+}
+
+func extractNeoForgeGameVersion(fullVersion string) string {
+	value := strings.TrimSpace(fullVersion)
+	if value == "" {
+		return ""
+	}
+	base := value
+	if idx := strings.Index(base, "-"); idx > 0 {
+		base = base[:idx]
+	}
+	parts := strings.Split(base, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	if !isNumericVersionPart(parts[0]) || !isNumericVersionPart(parts[1]) {
+		return ""
+	}
+	gameVersion := parts[0] + "." + parts[1]
+	if !isStableMinecraftVersion(gameVersion) {
+		return ""
+	}
+	return gameVersion
+}
+
+func isNumericVersionPart(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	_, err := strconv.Atoi(value)
+	return err == nil
+}
+
+func minecraftGameVersionMatches(candidate, requested string) bool {
+	candidate = strings.TrimSpace(candidate)
+	requested = strings.TrimSpace(requested)
+	if candidate == "" || requested == "" {
+		return false
+	}
+	if strings.EqualFold(candidate, requested) {
+		return true
+	}
+	if strings.HasPrefix(candidate, "1.") && strings.EqualFold(strings.TrimPrefix(candidate, "1."), requested) {
+		return true
+	}
+	if strings.HasPrefix(requested, "1.") && strings.EqualFold(candidate, strings.TrimPrefix(requested, "1.")) {
+		return true
+	}
+	return false
+}
+
+func latestBuildVersionForMinecraftGame(
+	fullVersions []string,
+	requestedGameVersion string,
+	extractGameVersion func(string) string,
+) string {
+	candidates := make([]string, 0, len(fullVersions))
+	for _, fullVersion := range fullVersions {
+		candidate := strings.TrimSpace(fullVersion)
+		if candidate == "" {
+			continue
+		}
+		gameVersion := extractGameVersion(candidate)
+		if !minecraftGameVersionMatches(gameVersion, requestedGameVersion) {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return compareLooseVersionStrings(candidates[i], candidates[j]) > 0
+	})
+	return candidates[0]
+}
+
+func compareLooseVersionStrings(a, b string) int {
+	aTokens := looseVersionTokenPattern.FindAllString(strings.ToLower(strings.TrimSpace(a)), -1)
+	bTokens := looseVersionTokenPattern.FindAllString(strings.ToLower(strings.TrimSpace(b)), -1)
+	maxLen := len(aTokens)
+	if len(bTokens) > maxLen {
+		maxLen = len(bTokens)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		if i >= len(aTokens) {
+			return compareMissingLooseVersionTail(bTokens[i:])
+		}
+		if i >= len(bTokens) {
+			return -compareMissingLooseVersionTail(aTokens[i:])
+		}
+
+		left := aTokens[i]
+		right := bTokens[i]
+		leftNum, leftErr := strconv.Atoi(left)
+		rightNum, rightErr := strconv.Atoi(right)
+
+		if leftErr == nil && rightErr == nil {
+			if leftNum > rightNum {
+				return 1
+			}
+			if leftNum < rightNum {
+				return -1
+			}
+			continue
+		}
+		if leftErr == nil && rightErr != nil {
+			return 1
+		}
+		if leftErr != nil && rightErr == nil {
+			return -1
+		}
+		if left > right {
+			return 1
+		}
+		if left < right {
+			return -1
+		}
+	}
+	return 0
+}
+
+func compareMissingLooseVersionTail(tokens []string) int {
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		if num, err := strconv.Atoi(token); err == nil {
+			if num == 0 {
+				continue
+			}
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
 func fetchExternalJSON(ctx context.Context, endpoint string, dst interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -455,6 +712,32 @@ func fetchExternalJSON(ctx context.Context, endpoint string, dst interface{}) er
 	}
 
 	dec := json.NewDecoder(io.LimitReader(resp.Body, maxExternalAPIResponseBytes))
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	return nil
+}
+
+func fetchExternalXML(ctx context.Context, endpoint string, dst interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "vestri-backend/1")
+	req.Header.Set("Accept", "application/xml,text/xml")
+
+	resp, err := externalAPIFetchClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("request to %s failed (%d): %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	dec := xml.NewDecoder(io.LimitReader(resp.Body, maxExternalAPIResponseBytes))
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
@@ -484,6 +767,12 @@ func resolveMinecraftServerArtifact(
 		return resolveBukkitServerArtifact(ctx, requestedGameVersion)
 	case minecraftSoftwareFabric:
 		return resolveFabricServerArtifact(ctx, requestedGameVersion)
+	case minecraftSoftwareForge:
+		return resolveForgeServerArtifact(ctx, requestedGameVersion)
+	case minecraftSoftwareNeoForge:
+		return resolveNeoForgeServerArtifact(ctx, requestedGameVersion)
+	case minecraftSoftwareSponge:
+		return resolveSpongeServerArtifact(ctx, requestedGameVersion)
 	case minecraftSoftwareVelocity:
 		return resolveVelocityServerArtifact(ctx, requestedGameVersion)
 	default:
@@ -804,6 +1093,204 @@ func fetchLatestFabricInstallerVersion(ctx context.Context) (string, error) {
 		return fallback, nil
 	}
 	return "", fmt.Errorf("no fabric installer versions are available")
+}
+
+func resolveForgeServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+	gameVersion := strings.TrimSpace(requestedVersion)
+	if gameVersion == "" || strings.EqualFold(gameVersion, "LATEST") {
+		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwareForge)
+		if err != nil {
+			return nil, err
+		}
+		if len(versions) == 0 {
+			return nil, fmt.Errorf("no forge versions are available")
+		}
+		gameVersion = versions[0]
+	}
+	if !isStableMinecraftVersion(gameVersion) {
+		return nil, fmt.Errorf("forge version %q is invalid", gameVersion)
+	}
+
+	fullVersions, err := fetchMavenMetadataVersions(ctx, forgeMavenMetadataURL)
+	if err != nil {
+		return nil, err
+	}
+	selectedBuild := latestBuildVersionForMinecraftGame(fullVersions, gameVersion, extractForgeGameVersion)
+	if selectedBuild == "" {
+		return nil, fmt.Errorf("forge version %s has no builds", gameVersion)
+	}
+
+	fileName := fmt.Sprintf("forge-%s-universal.jar", selectedBuild)
+	downloadURL := fmt.Sprintf(
+		"%s/%s/%s",
+		forgeMavenBaseURL,
+		url.PathEscape(selectedBuild),
+		url.PathEscape(fileName),
+	)
+	return &minecraftServerArtifact{
+		Software:    minecraftSoftwareForge,
+		Version:     gameVersion,
+		DownloadURL: downloadURL,
+		FileName:    fileName,
+	}, nil
+}
+
+func resolveNeoForgeServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+	gameVersion := strings.TrimSpace(requestedVersion)
+	if gameVersion == "" || strings.EqualFold(gameVersion, "LATEST") {
+		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwareNeoForge)
+		if err != nil {
+			return nil, err
+		}
+		if len(versions) == 0 {
+			return nil, fmt.Errorf("no neoforge versions are available")
+		}
+		gameVersion = versions[0]
+	}
+	if !isStableMinecraftVersion(gameVersion) {
+		return nil, fmt.Errorf("neoforge version %q is invalid", gameVersion)
+	}
+
+	fullVersions, err := fetchMavenMetadataVersions(ctx, neoForgeMavenMetadataURL)
+	if err != nil {
+		return nil, err
+	}
+	selectedBuild := latestBuildVersionForMinecraftGame(fullVersions, gameVersion, extractNeoForgeGameVersion)
+	if selectedBuild == "" {
+		return nil, fmt.Errorf("neoforge version %s has no builds", gameVersion)
+	}
+
+	fileName := fmt.Sprintf("neoforge-%s-universal.jar", selectedBuild)
+	downloadURL := fmt.Sprintf(
+		"%s/%s/%s",
+		neoForgeMavenBaseURL,
+		url.PathEscape(selectedBuild),
+		url.PathEscape(fileName),
+	)
+	return &minecraftServerArtifact{
+		Software:    minecraftSoftwareNeoForge,
+		Version:     gameVersion,
+		DownloadURL: downloadURL,
+		FileName:    fileName,
+	}, nil
+}
+
+func resolveSpongeServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+	gameVersion := strings.TrimSpace(requestedVersion)
+	if gameVersion == "" || strings.EqualFold(gameVersion, "LATEST") {
+		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwareSponge)
+		if err != nil {
+			return nil, err
+		}
+		if len(versions) == 0 {
+			return nil, fmt.Errorf("no sponge versions are available")
+		}
+		gameVersion = versions[0]
+	}
+	if !isStableMinecraftVersion(gameVersion) {
+		return nil, fmt.Errorf("sponge version %q is invalid", gameVersion)
+	}
+
+	selectedBuild, err := fetchLatestSpongeBuildVersionForGame(ctx, gameVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	detailsURL := fmt.Sprintf("%s/%s", spongeVersionsURL, url.PathEscape(selectedBuild))
+	var payload spongeVersionDetailsResponse
+	if err := fetchExternalJSON(ctx, detailsURL, &payload); err != nil {
+		return nil, err
+	}
+
+	downloadURL, fileName := selectPreferredSpongeJarAsset(payload.Assets, selectedBuild)
+	if downloadURL == "" {
+		return nil, fmt.Errorf("sponge version %s has no downloadable jar", gameVersion)
+	}
+
+	return &minecraftServerArtifact{
+		Software:    minecraftSoftwareSponge,
+		Version:     gameVersion,
+		DownloadURL: downloadURL,
+		FileName:    fileName,
+	}, nil
+}
+
+func fetchLatestSpongeBuildVersionForGame(ctx context.Context, gameVersion string) (string, error) {
+	params := url.Values{}
+	params.Set("tags", "minecraft:"+gameVersion)
+	params.Set("offset", "0")
+	params.Set("limit", "1000")
+	endpoint := spongeVersionsURL + "?" + params.Encode()
+
+	var payload spongeVersionsResponse
+	if err := fetchExternalJSON(ctx, endpoint, &payload); err != nil {
+		return "", err
+	}
+	if len(payload.Artifacts) == 0 {
+		return "", fmt.Errorf("sponge version %s has no builds", gameVersion)
+	}
+
+	recommended := make([]string, 0, len(payload.Artifacts))
+	all := make([]string, 0, len(payload.Artifacts))
+	for buildVersion, build := range payload.Artifacts {
+		candidate := strings.TrimSpace(buildVersion)
+		if candidate == "" {
+			continue
+		}
+		all = append(all, candidate)
+		if build.Recommended {
+			recommended = append(recommended, candidate)
+		}
+	}
+	selected := recommended
+	if len(selected) == 0 {
+		selected = all
+	}
+	if len(selected) == 0 {
+		return "", fmt.Errorf("sponge version %s has no builds", gameVersion)
+	}
+
+	sort.Slice(selected, func(i, j int) bool {
+		return compareLooseVersionStrings(selected[i], selected[j]) > 0
+	})
+	return selected[0], nil
+}
+
+func selectPreferredSpongeJarAsset(assets []spongeVersionAsset, buildVersion string) (string, string) {
+	fallbackURL := ""
+	fallbackFileName := ""
+	for _, asset := range assets {
+		if !strings.EqualFold(strings.TrimSpace(asset.Extension), "jar") {
+			continue
+		}
+		downloadURL := strings.TrimSpace(asset.DownloadURL)
+		if downloadURL == "" {
+			continue
+		}
+		classifier := strings.ToLower(strings.TrimSpace(asset.Classifier))
+		fileName := fileNameFromURL(downloadURL, "")
+		if classifier == "universal" {
+			if fileName == "" {
+				fileName = fmt.Sprintf("spongevanilla-%s-universal.jar", buildVersion)
+			}
+			return downloadURL, fileName
+		}
+		if fallbackURL == "" && classifier == "" {
+			fallbackURL = downloadURL
+			fallbackFileName = fileName
+		}
+		if fallbackURL == "" {
+			fallbackURL = downloadURL
+			fallbackFileName = fileName
+		}
+	}
+	if fallbackURL == "" {
+		return "", ""
+	}
+	if fallbackFileName == "" {
+		fallbackFileName = fmt.Sprintf("spongevanilla-%s.jar", buildVersion)
+	}
+	return fallbackURL, fallbackFileName
 }
 
 func resolveVelocityServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
