@@ -1,3 +1,5 @@
-# ⚠️ THIS PROJECT IS WORK IN PROGESS AND WILL NOT RUN ⚠️
+# Vestri Backend
 
-A free and open source tool for easy game server deployment.
+Backend documentation lives in the main repository:
+
+- https://github.com/dhernos/vestri
