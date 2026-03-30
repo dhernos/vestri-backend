@@ -76,7 +76,7 @@ func Load() (Config, error) {
 		BaseURL:                 firstNonEmpty(os.Getenv("APP_BASE_URL"), os.Getenv("NEXTAUTH_URL"), "http://localhost:3000"),
 		DatabaseURL:             os.Getenv("DATABASE_URL"),
 		RedisURL:                getenvDefault("REDIS_URL", "redis://localhost:6379"),
-		UploadDir:               getenvDefault("UPLOAD_DIR", "../auth_template/public/uploads"),
+		UploadDir:               getenvDefault("UPLOAD_DIR", "../vestri/public/uploads"),
 		LogFile:                 getenvDefault("LOG_FILE", "logs/server.log"),
 		LogMaxSizeMB:            getenvIntDefault("LOG_MAX_SIZE_MB", 5),
 		LogMaxBackups:           getenvIntDefault("LOG_MAX_BACKUPS", 1),

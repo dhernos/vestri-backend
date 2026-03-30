@@ -33,14 +33,10 @@ func NewRotatingFileWriter(path string, maxSizeBytes int64, maxBackups int) (*Ro
 		return nil, err
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// Start each process with a fresh log file.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, err
-	}
-
-	var size int64
-	if stat, err := f.Stat(); err == nil {
-		size = stat.Size()
 	}
 
 	w := &RotatingFileWriter{
@@ -48,14 +44,7 @@ func NewRotatingFileWriter(path string, maxSizeBytes int64, maxBackups int) (*Ro
 		maxSizeBytes: maxSizeBytes,
 		maxBackups:   maxBackups,
 		file:         f,
-		size:         size,
-	}
-
-	// If the file is already oversized at startup, rotate immediately.
-	if w.size > w.maxSizeBytes {
-		if err := w.rotateLocked(); err != nil {
-			return nil, err
-		}
+		size:         0,
 	}
 
 	return w, nil

@@ -2,10 +2,7 @@ package server
 
 import (
 	"fmt"
-	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"yourapp/internal/i18n"
@@ -275,75 +272,26 @@ func (s *Server) handleUpdateImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(5 << 20); err != nil { // 5 MB buffer
-		writeError(w, http.StatusBadRequest, "Invalid form data")
+	var req struct {
+		ImageURL string `json:"imageUrl"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	file, header, err := r.FormFile("image")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "No file uploaded")
+	imageURL := strings.TrimSpace(req.ImageURL)
+	if imageURL == "" {
+		writeError(w, http.StatusBadRequest, "imageUrl is required")
 		return
 	}
-	defer file.Close()
-
-	if header.Size > 3*1024*1024 {
-		writeError(w, http.StatusBadRequest, "File too large. Max 3MB.")
+	if !strings.HasPrefix(imageURL, "/uploads/") {
+		writeError(w, http.StatusBadRequest, "Invalid image path")
 		return
 	}
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to read file")
+	if strings.Contains(imageURL, "..") || strings.Contains(imageURL, "\\") {
+		writeError(w, http.StatusBadRequest, "Invalid image path")
 		return
-	}
-
-	contentType := header.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = http.DetectContentType(data)
-	}
-
-	validTypes := map[string]bool{
-		"image/png":  true,
-		"image/jpeg": true,
-		"image/jpg":  true,
-		"image/webp": true,
-	}
-	if !validTypes[contentType] {
-		writeError(w, http.StatusBadRequest, "Invalid image format.")
-		return
-	}
-
-	hash := hashBytes(data)
-	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(header.Filename)), ".")
-	if ext == "" {
-		switch contentType {
-		case "image/png":
-			ext = "png"
-		case "image/webp":
-			ext = "webp"
-		default:
-			ext = "jpg"
-		}
-	}
-
-	uploadDir := filepath.Join(s.Config.UploadDir, hash)
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to create upload directory")
-		return
-	}
-
-	filePath := filepath.Join(uploadDir, fmt.Sprintf("profile.%s", ext))
-	if err := os.WriteFile(filePath, data, 0o644); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to save image")
-		return
-	}
-
-	imageURL := fmt.Sprintf("/uploads/%s/profile.%s", hash, ext)
-
-	user, err := s.Users.FindByID(r.Context(), sess.UserID)
-	if err == nil && user != nil && user.Image != nil {
-		s.removeOldImage(*user.Image)
 	}
 
 	if _, err := s.Users.UpdateImage(r.Context(), sess.UserID, imageURL); err != nil {
@@ -355,16 +303,6 @@ func (s *Server) handleUpdateImage(w http.ResponseWriter, r *http.Request) {
 		"message":  "Uploaded successfully",
 		"imageUrl": imageURL,
 	})
-}
-
-func (s *Server) removeOldImage(imagePath string) {
-	if !strings.HasPrefix(imagePath, "/uploads/") {
-		return
-	}
-	rel := strings.TrimPrefix(imagePath, "/uploads/")
-	dir := filepath.Dir(rel)
-	abs := filepath.Join(s.Config.UploadDir, dir)
-	_ = os.RemoveAll(abs)
 }
 
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
