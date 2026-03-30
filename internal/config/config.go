@@ -13,6 +13,8 @@ import (
 type Config struct {
 	Port                    string
 	BaseURL                 string
+	EnforceHTTPSAuth        bool
+	SessionCookieSecure     bool
 	DatabaseURL             string
 	RedisURL                string
 	UploadDir               string
@@ -88,6 +90,8 @@ func Load() (Config, error) {
 		NodeAPIKeyEncryptionKey: os.Getenv("NODE_API_KEY_ENCRYPTION_KEY"),
 		TrustedProxies:          parseList(os.Getenv("TRUSTED_PROXIES")),
 	}
+	cfg.EnforceHTTPSAuth = parseBoolDefault(os.Getenv("ENFORCE_HTTPS_AUTH"), urlUsesHTTPS(cfg.BaseURL))
+	cfg.SessionCookieSecure = parseBoolDefault(os.Getenv("SESSION_COOKIE_SECURE"), urlUsesHTTPS(cfg.BaseURL))
 
 	cfg.Email = EmailConfig{
 		Host:     clean(os.Getenv("EMAIL_SERVER_HOST")),
@@ -165,6 +169,14 @@ func parseBool(val string) bool {
 	return val == "1" || val == "true" || val == "yes"
 }
 
+func parseBoolDefault(val string, def bool) bool {
+	trimmed := strings.ToLower(strings.Trim(val, "\"' "))
+	if trimmed == "" {
+		return def
+	}
+	return trimmed == "1" || trimmed == "true" || trimmed == "yes"
+}
+
 func parseList(val string) []string {
 	parts := strings.Split(val, ",")
 	var out []string
@@ -182,4 +194,12 @@ func hostFromURL(raw string) string {
 		return raw
 	}
 	return u.Hostname()
+}
+
+func urlUsesHTTPS(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "https")
 }

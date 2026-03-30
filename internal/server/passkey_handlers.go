@@ -272,7 +272,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.RateLimiter.ResetLogin(ctx, clientIP(r, s.trustedProxies))
-	auth.SetSessionCookie(w, session.ID, session.ExpiresAt)
+	auth.SetSessionCookie(w, session.ID, session.ExpiresAt, s.Config.SessionCookieSecure)
 	locale := i18n.LocaleFromRequest(r)
 	_ = s.sendSignInAlert(ctx, user, session, locale)
 

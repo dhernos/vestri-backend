@@ -231,7 +231,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.RateLimiter.ResetLogin(ctx, ip)
-	auth.SetSessionCookie(w, session.ID, session.ExpiresAt)
+	auth.SetSessionCookie(w, session.ID, session.ExpiresAt, s.Config.SessionCookieSecure)
 	_ = s.sendSignInAlert(ctx, user, session, locale)
 
 	http.Redirect(w, r, returnTo, http.StatusFound)
@@ -440,7 +440,7 @@ func (s *Server) handleOAuthTwoFactor(w http.ResponseWriter, r *http.Request) {
 	_ = s.Redis.Del(r.Context(), oauthPendingPrefix+pendingID).Err()
 
 	s.RateLimiter.ResetLogin(r.Context(), sess.IP)
-	auth.SetSessionCookie(w, sess.ID, sess.ExpiresAt)
+	auth.SetSessionCookie(w, sess.ID, sess.ExpiresAt, s.Config.SessionCookieSecure)
 	locale := i18n.LocaleFromRequest(r)
 	_ = s.sendSignInAlert(r.Context(), user, sess, locale)
 

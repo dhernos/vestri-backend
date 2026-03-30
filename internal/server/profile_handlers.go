@@ -195,6 +195,10 @@ type changePasswordRequest struct {
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	if s.rejectInsecureAuthTransport(w, r) {
+		return
+	}
+
 	sess := sessionFromContext(r.Context())
 	if sess == nil {
 		writeError(w, http.StatusUnauthorized, "Unauthorized")

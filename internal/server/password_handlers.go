@@ -99,6 +99,10 @@ type resetPasswordRequest struct {
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	if s.rejectInsecureAuthTransport(w, r) {
+		return
+	}
+
 	var req resetPasswordRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")

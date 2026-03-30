@@ -21,6 +21,10 @@ type registerRequest struct {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if s.rejectInsecureAuthTransport(w, r) {
+		return
+	}
+
 	var req registerRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -220,6 +224,10 @@ type loginRequest struct {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if s.rejectInsecureAuthTransport(w, r) {
+		return
+	}
+
 	var req loginRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -313,7 +321,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RateLimiter.ResetLogin(ctx, ip)
-	auth.SetSessionCookie(w, session.ID, session.ExpiresAt)
+	auth.SetSessionCookie(w, session.ID, session.ExpiresAt, s.Config.SessionCookieSecure)
 	_ = s.sendSignInAlert(ctx, user, session, locale)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -338,7 +346,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if err == nil && cookie.Value != "" {
 		_ = s.Sessions.Delete(r.Context(), cookie.Value)
 	}
-	auth.ClearSessionCookie(w)
+	auth.ClearSessionCookie(w, s.Config.SessionCookieSecure)
 	w.WriteHeader(http.StatusNoContent)
 }
 
