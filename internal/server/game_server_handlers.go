@@ -367,6 +367,12 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		requestedName = template.Name
 	}
 
+	baseURL, apiKey, err := s.workerTargetFromNode(node)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
+		return
+	}
+
 	slugBase := slugify(requestedName)
 	if slugBase == "" {
 		slugBase = slugify(template.ID)
@@ -375,7 +381,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		slugBase = "game-server"
 	}
 
-	slug, err := s.uniqueGameServerSlug(r.Context(), node.ID, slugBase)
+	slug, err := s.uniqueGameServerSlug(r.Context(), node.ID, slugBase, baseURL, apiKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to reserve game server slug")
 		return
@@ -385,6 +391,16 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	stackName := slug
 	rootPath := slug
 	composePath := path.Join(rootPath, "docker-compose.yml")
+	cleanupRootOnFailure := true
+	defer func() {
+		if !cleanupRootOnFailure {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = s.workerDeletePath(cleanupCtx, baseURL, apiKey, rootPath, true)
+	}()
+
 	minecraftServerJarName := defaultMinecraftServerJarFile
 	if shouldProvisionMinecraftArtifact {
 		if minecraftArtifact == nil {
@@ -488,12 +504,6 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	baseURL, apiKey, err := s.workerTargetFromNode(node)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
-		return
-	}
-
 	if err := s.workerWriteFile(r.Context(), baseURL, apiKey, composePath, composeContent); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to write compose file on worker")
 		return
@@ -571,6 +581,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "Failed to create game server")
 		return
 	}
+	cleanupRootOnFailure = false
 
 	serverRole := auth.NodeAccessOwner
 	if sess.UserID != node.OwnerUserID {
@@ -2490,18 +2501,40 @@ func resolveTemplateVersionValue(config *gameServerTemplateVersions, field, raw,
 	return "", fmt.Errorf("invalid value for %s", cfg.Label)
 }
 
-func (s *Server) uniqueGameServerSlug(ctx context.Context, nodeID, base string) (string, error) {
+func (s *Server) uniqueGameServerSlug(
+	ctx context.Context,
+	nodeID,
+	base string,
+	baseURL *url.URL,
+	apiKey string,
+) (string, error) {
+	tryReserveCandidate := func(candidate string) (bool, error) {
+		exists, err := s.Users.GameServerSlugExists(ctx, nodeID, candidate)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return false, nil
+		}
+
+		reserved, err := s.workerReserveDirectory(ctx, baseURL, apiKey, candidate)
+		if err != nil {
+			return false, err
+		}
+		return reserved, nil
+	}
+
 	candidate := base
 	for i := 0; i < 20; i++ {
 		if i > 0 {
 			candidate = fmt.Sprintf("%s-%d", base, i+1)
 		}
 
-		exists, err := s.Users.GameServerSlugExists(ctx, nodeID, candidate)
+		reserved, err := tryReserveCandidate(candidate)
 		if err != nil {
 			return "", err
 		}
-		if !exists {
+		if reserved {
 			return candidate, nil
 		}
 	}
@@ -2509,14 +2542,43 @@ func (s *Server) uniqueGameServerSlug(ctx context.Context, nodeID, base string) 
 	for {
 		suffix := strings.ReplaceAll(auth.NewSessionID(), "-", "")
 		candidate = fmt.Sprintf("%s-%s", base, suffix[:8])
-		exists, err := s.Users.GameServerSlugExists(ctx, nodeID, candidate)
+		reserved, err := tryReserveCandidate(candidate)
 		if err != nil {
 			return "", err
 		}
-		if !exists {
+		if reserved {
 			return candidate, nil
 		}
 	}
+}
+
+func (s *Server) workerReserveDirectory(ctx context.Context, baseURL *url.URL, apiKey, targetPath string) (bool, error) {
+	statusCode, body, err := s.callWorkerJSON(
+		ctx,
+		baseURL,
+		apiKey,
+		http.MethodPost,
+		"/fs/mkdir",
+		map[string]interface{}{
+			"path":      targetPath,
+			"exclusive": true,
+		},
+	)
+	if err != nil {
+		return false, err
+	}
+	return parseWorkerDirectoryReservation(statusCode, string(body))
+}
+
+func parseWorkerDirectoryReservation(statusCode int, body string) (bool, error) {
+	message := strings.TrimSpace(body)
+	switch statusCode {
+	case http.StatusCreated, http.StatusOK:
+		return true, nil
+	case http.StatusConflict:
+		return false, nil
+	}
+	return false, fmt.Errorf("worker /fs/mkdir failed (%d): %s", statusCode, message)
 }
 
 func resolveTemplateCompose(ctx context.Context, tpl *gameServerTemplate, values map[string]string) (string, error) {
