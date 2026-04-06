@@ -13,7 +13,6 @@ import (
 type Config struct {
 	Port                    string
 	BaseURL                 string
-	EnforceHTTPSAuth        bool
 	SessionCookieSecure     bool
 	DatabaseURL             string
 	RedisURL                string
@@ -90,7 +89,6 @@ func Load() (Config, error) {
 		NodeAPIKeyEncryptionKey: os.Getenv("NODE_API_KEY_ENCRYPTION_KEY"),
 		TrustedProxies:          parseList(os.Getenv("TRUSTED_PROXIES")),
 	}
-	cfg.EnforceHTTPSAuth = parseBoolDefault(os.Getenv("ENFORCE_HTTPS_AUTH"), urlUsesHTTPS(cfg.BaseURL))
 	cfg.SessionCookieSecure = parseBoolDefault(os.Getenv("SESSION_COOKIE_SECURE"), urlUsesHTTPS(cfg.BaseURL))
 
 	cfg.Email = EmailConfig{

@@ -94,15 +94,12 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 type resetPasswordRequest struct {
-	Token    string `json:"token"`
-	Password string `json:"password"`
+	Token          string `json:"token"`
+	Password       string `json:"password"`
+	PasswordFormat string `json:"passwordFormat,omitempty"`
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	if s.rejectInsecureAuthTransport(w, r) {
-		return
-	}
-
 	var req resetPasswordRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -112,7 +109,8 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Token is required")
 		return
 	}
-	if err := validatePassword(req.Password); err != nil {
+	passwordForStorage, err := validatePasswordForStorage(req.Password, req.PasswordFormat)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -128,7 +126,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hashed, err := s.Hasher.Hash(req.Password)
+	hashed, err := s.Hasher.Hash(passwordForStorage)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to hash password")
 		return

@@ -190,15 +190,13 @@ func (s *Server) handleUpdateEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 type changePasswordRequest struct {
-	CurrentPassword string `json:"currentPassword"`
-	NewPassword     string `json:"newPassword"`
+	CurrentPassword       string `json:"currentPassword"`
+	CurrentPasswordFormat string `json:"currentPasswordFormat,omitempty"`
+	NewPassword           string `json:"newPassword"`
+	NewPasswordFormat     string `json:"newPasswordFormat,omitempty"`
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	if s.rejectInsecureAuthTransport(w, r) {
-		return
-	}
-
 	sess := sessionFromContext(r.Context())
 	if sess == nil {
 		writeError(w, http.StatusUnauthorized, "Unauthorized")
@@ -210,11 +208,18 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if req.CurrentPassword == "" {
-		writeError(w, http.StatusBadRequest, "Current password is required.")
+	currentPasswordForCompare, _, err := normalizeTransportPassword(req.CurrentPassword, req.CurrentPasswordFormat)
+	if err != nil {
+		if req.CurrentPassword == "" {
+			writeError(w, http.StatusBadRequest, "Current password is required.")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := validatePassword(req.NewPassword); err != nil {
+
+	newPasswordForStorage, err := validatePasswordForStorage(req.NewPassword, req.NewPasswordFormat)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -245,12 +250,12 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.Hasher.Compare(*user.PasswordHash, req.CurrentPassword) {
+	if !s.Hasher.Compare(*user.PasswordHash, currentPasswordForCompare) {
 		writeError(w, http.StatusUnauthorized, "Incorrect current password.")
 		return
 	}
 
-	hashed, err := s.Hasher.Hash(req.NewPassword)
+	hashed, err := s.Hasher.Hash(newPasswordForStorage)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to hash password")
 		return

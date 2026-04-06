@@ -15,16 +15,13 @@ import (
 )
 
 type registerRequest struct {
-	Name     *string `json:"name"`
-	Email    string  `json:"email"`
-	Password string  `json:"password"`
+	Name           *string `json:"name"`
+	Email          string  `json:"email"`
+	Password       string  `json:"password"`
+	PasswordFormat string  `json:"passwordFormat,omitempty"`
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if s.rejectInsecureAuthTransport(w, r) {
-		return
-	}
-
 	var req registerRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -35,7 +32,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Invalid email format")
 		return
 	}
-	if err := validatePassword(req.Password); err != nil {
+	passwordForStorage, err := validatePasswordForStorage(req.Password, req.PasswordFormat)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -70,7 +68,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hashed, err := s.Hasher.Hash(req.Password)
+	hashed, err := s.Hasher.Hash(passwordForStorage)
 	if err != nil {
 		log.Printf("register: hash failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "Failed to hash password")
@@ -217,23 +215,21 @@ func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request
 }
 
 type loginRequest struct {
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	Code       string `json:"code,omitempty"`
-	RememberMe bool   `json:"rememberMe"`
+	Email          string `json:"email"`
+	Password       string `json:"password"`
+	PasswordFormat string `json:"passwordFormat,omitempty"`
+	Code           string `json:"code,omitempty"`
+	RememberMe     bool   `json:"rememberMe"`
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if s.rejectInsecureAuthTransport(w, r) {
-		return
-	}
-
 	var req loginRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if !validateEmail(req.Email) || req.Password == "" {
+	passwordForCompare, _, err := normalizeTransportPassword(req.Password, req.PasswordFormat)
+	if !validateEmail(req.Email) || err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid credentials")
 		return
 	}
@@ -254,7 +250,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Login failed")
 		return
 	}
-	if user == nil || user.PasswordHash == nil || !s.Hasher.Compare(*user.PasswordHash, req.Password) {
+	if user == nil || user.PasswordHash == nil || !s.Hasher.Compare(*user.PasswordHash, passwordForCompare) {
 		_ = s.RateLimiter.RegisterLoginFailure(ctx, ip)
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS")
 		return
