@@ -140,7 +140,7 @@ var emailTranslations = map[string]emailStrings{
 	},
 }
 
-const emailBrandLogoURL = "https://raw.githubusercontent.com/dhernos/vestri/main/public/logos/vestri/vestri.png"
+const emailBrandLogoURL = "https://raw.githubusercontent.com/dhernos/vestri/main/public/logos/vestri/vestri_no_font.png"
 
 func emailStringsForLocale(locale string) emailStrings {
 	key := NormalizeLocale(locale)
