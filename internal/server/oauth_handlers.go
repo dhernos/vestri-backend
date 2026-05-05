@@ -166,6 +166,22 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	avatarURL := strings.TrimSpace(userInfo.Avatar)
+	if avatarURL != "" {
+		currentImage := ""
+		if user.Image != nil {
+			currentImage = strings.TrimSpace(*user.Image)
+		}
+		if currentImage == "" || currentImage == "/default-profile.png" {
+			updatedUser, err := s.Users.UpdateImage(ctx, user.ID, avatarURL)
+			if err != nil {
+				log.Printf("oauth callback: failed to sync avatar for user %s: %v", user.ID, err)
+			} else {
+				user = updatedUser
+			}
+		}
+	}
+
 	now := time.Now()
 
 	if user.TwoFactorEnabled {
