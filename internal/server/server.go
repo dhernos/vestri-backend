@@ -155,6 +155,7 @@ func (s *Server) Router() http.Handler {
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/unzip"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/unzip", s.handleUnzipVelocityGroupFile)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/download"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/download", s.handleDownloadVelocityGroupFile)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/upload"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/upload", s.handleUploadVelocityGroupFile)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/apply"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/group-files/apply", s.handleApplyVelocityGroupFiles)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/invites"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/invites", s.handleListGameServerInvites)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/invites"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/invites", s.handleCreateGameServerInvite)
 		pr.With(s.requireRoles(accessRoles(http.MethodDelete, "/api/nodes/{nodeRef}/servers/{serverRef}/invites/{inviteId}"))).Delete("/api/nodes/{nodeRef}/servers/{serverRef}/invites/{inviteId}", s.handleRevokeGameServerInvite)

@@ -87,6 +87,7 @@ var endpointAccess = []AccessRule{
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/unzip", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/download", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/upload", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/apply", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/invites", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/invites", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodDelete, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/invites/{inviteId}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
