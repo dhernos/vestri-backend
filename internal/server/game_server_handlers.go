@@ -535,6 +535,17 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if parentServer != nil {
+		if err := ensureVelocityGroupStagingDirectory(r.Context(), s, baseURL, apiKey, parentServer.RootPath); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to prepare Velocity plugin staging folder")
+			return
+		}
+		softwareFolder := velocityPluginSoftwareFolder(softwareVersion)
+		if softwareFolder != "" {
+			if err := ensureVelocityGroupSoftwareDirectory(r.Context(), s, baseURL, apiKey, parentServer.RootPath, softwareFolder); err != nil {
+				writeError(w, http.StatusBadGateway, "Failed to prepare software-specific plugin staging folder")
+				return
+			}
+		}
 		forwardingSecret, registerErr := s.registerVelocityBackendAndResolveForwardingSecret(
 			r.Context(),
 			baseURL,

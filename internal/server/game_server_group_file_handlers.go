@@ -3,6 +3,7 @@ package server
 import (
 	"archive/zip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,9 +23,15 @@ type velocityGroupFileTarget struct {
 }
 
 const velocityGroupStagingRelativePath = "data/vestri-plugin-staging"
+const velocityManagedPluginManifestName = ".vestri-managed-plugin-files.json"
 
 type applyVelocityGroupFilesRequest struct {
 	ServerRefs []string `json:"serverRefs"`
+}
+
+type createVelocityGroupFolderRequest struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
 }
 
 func (s *Server) loadVelocityGroupFileTargets(w http.ResponseWriter, r *http.Request) (*auth.GameServer, []velocityGroupFileTarget, *url.URL, string, bool) {
@@ -66,6 +73,16 @@ func (s *Server) loadVelocityGroupFileTargets(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Failed to prepare Velocity plugin staging folder")
 		return nil, nil, nil, "", false
 	}
+	for _, target := range targets {
+		softwareFolder := velocityPluginSoftwareFolder(parseGameServerMetadata(target.server.Metadata).SoftwareVersion)
+		if softwareFolder == "" {
+			continue
+		}
+		if err := ensureVelocityGroupSoftwareDirectory(r.Context(), s, baseURL, apiKey, proxy.RootPath, softwareFolder); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to prepare software-specific plugin folder")
+			return nil, nil, nil, "", false
+		}
+	}
 	return proxy, targets, baseURL, apiKey, true
 }
 
@@ -87,12 +104,56 @@ func ensureVelocityGroupStagingDirectory(ctx context.Context, s *Server, baseURL
 	return fmt.Errorf("worker /fs/mkdir failed (%d): %s", status, strings.TrimSpace(string(body)))
 }
 
+func velocityPluginSoftwareFolder(software string) string {
+	switch strings.ToUpper(strings.TrimSpace(software)) {
+	case "PAPER":
+		return "paper"
+	case "PURPUR":
+		return "purpur"
+	case "SPIGOT":
+		return "spigot"
+	case "BUKKIT":
+		return "bukkit"
+	default:
+		return ""
+	}
+}
+
+func ensureVelocityGroupSoftwareDirectory(ctx context.Context, s *Server, baseURL *url.URL, apiKey, proxyRoot, softwareFolder string) error {
+	targetPath := path.Join(proxyRoot, velocityGroupStagingRelativePath, softwareFolder)
+	return ensureWorkerDirectory(ctx, s, baseURL, apiKey, targetPath)
+}
+
+func resolveVelocityGroupStagingPath(proxyRoot, rawPath string, allowSoftwareRoot bool) (string, string, error) {
+	stagingRoot := path.Join(proxyRoot, velocityGroupStagingRelativePath)
+	fullPath, err := resolveServerScopedPath(stagingRoot, rawPath, true)
+	if err != nil {
+		return "", "", err
+	}
+	cleanPath := path.Clean(strings.TrimLeft(strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/"), "/"))
+	if cleanPath == "." || cleanPath == "" {
+		if allowSoftwareRoot {
+			return fullPath, "", nil
+		}
+		return "", "", fmt.Errorf("choose a software subfolder first")
+	}
+	parts := strings.Split(cleanPath, "/")
+	softwareFolder := parts[0]
+	if velocityPluginSoftwareFolder(softwareFolder) != softwareFolder {
+		return "", "", fmt.Errorf("path must be inside a supported software folder")
+	}
+	if len(parts) == 1 && !allowSoftwareRoot {
+		return "", "", fmt.Errorf("changes are not allowed at the software folder root")
+	}
+	return fullPath, softwareFolder, nil
+}
+
 func (s *Server) handleListVelocityGroupFiles(w http.ResponseWriter, r *http.Request) {
 	proxy, _, baseURL, apiKey, ok := s.loadVelocityGroupFileTargets(w, r)
 	if !ok {
 		return
 	}
-	fullPath, err := resolveServerScopedPath(path.Join(proxy.RootPath, velocityGroupStagingRelativePath), r.URL.Query().Get("path"), true)
+	fullPath, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, r.URL.Query().Get("path"), true)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -107,7 +168,7 @@ func (s *Server) handleReadVelocityGroupFile(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	fullPath, err := resolveServerScopedPath(path.Join(proxy.RootPath, velocityGroupStagingRelativePath), r.URL.Query().Get("path"), false)
+	fullPath, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, r.URL.Query().Get("path"), false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -141,7 +202,7 @@ func (s *Server) handleWriteVelocityGroupFile(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	fullPath, err := resolveServerScopedPath(path.Join(proxy.RootPath, velocityGroupStagingRelativePath), req.Path, false)
+	fullPath, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, req.Path, false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -164,7 +225,7 @@ func (s *Server) handleDeleteVelocityGroupFile(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	fullPath, err := resolveServerScopedPath(path.Join(proxy.RootPath, velocityGroupStagingRelativePath), req.Path, false)
+	fullPath, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, req.Path, false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -187,12 +248,12 @@ func (s *Server) handleUnzipVelocityGroupFile(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	source, err := resolveServerScopedPath(path.Join(proxy.RootPath, velocityGroupStagingRelativePath), req.Source, false)
+	source, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, req.Source, false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dest, err := resolveServerScopedPath(path.Join(proxy.RootPath, velocityGroupStagingRelativePath), req.Dest, true)
+	dest, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, req.Dest, true)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -210,7 +271,7 @@ func (s *Server) handleDownloadVelocityGroupFile(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	fullPath, err := resolveServerScopedPath(path.Join(proxy.RootPath, velocityGroupStagingRelativePath), r.URL.Query().Get("path"), false)
+	fullPath, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, r.URL.Query().Get("path"), false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -266,6 +327,33 @@ func (s *Server) handleDownloadVelocityGroupFile(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".zip"))
 	w.WriteHeader(archiveResp.StatusCode)
 	_, _ = io.Copy(w, archiveResp.Body)
+}
+
+func (s *Server) handleCreateVelocityGroupFolder(w http.ResponseWriter, r *http.Request) {
+	proxy, _, baseURL, apiKey, ok := s.loadVelocityGroupFileTargets(w, r)
+	if !ok {
+		return
+	}
+	var req createVelocityGroupFolderRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	folderName := strings.TrimSpace(strings.ReplaceAll(req.Name, "\\", "/"))
+	if folderName == "" || folderName == "." || folderName == ".." || path.Base(folderName) != folderName {
+		writeError(w, http.StatusBadRequest, "A single folder name is required")
+		return
+	}
+	fullPath, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, path.Join(req.Path, folderName), false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := ensureWorkerDirectory(r.Context(), s, baseURL, apiKey, fullPath); err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to create plugin staging folder")
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
 }
 
 func (s *Server) handleUploadVelocityGroupFile(w http.ResponseWriter, r *http.Request) {
@@ -335,7 +423,7 @@ func (s *Server) handleUploadVelocityGroupFile(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "path and file are required")
 		return
 	}
-	fullPath, err := resolveServerScopedPath(path.Join(proxy.RootPath, velocityGroupStagingRelativePath), rawPath, false)
+	fullPath, _, err := resolveVelocityGroupStagingPath(proxy.RootPath, rawPath, false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -428,51 +516,61 @@ func (s *Server) handleApplyVelocityGroupFiles(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadGateway, "Failed to prepare Velocity plugin staging folder")
 		return
 	}
-	stagingPath, err := resolveServerScopedPath(proxy.RootPath, velocityGroupStagingRelativePath, false)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Velocity plugin staging path is invalid")
-		return
+	targetsBySoftware := make(map[string][]velocityGroupFileTarget)
+	for _, target := range targets {
+		softwareFolder := velocityPluginSoftwareFolder(parseGameServerMetadata(target.server.Metadata).SoftwareVersion)
+		targetsBySoftware[softwareFolder] = append(targetsBySoftware[softwareFolder], target)
 	}
-	archive := buildTempArchiveTarget(proxy.RootPath, "plugin-staging")
-	defer s.cleanupWorkerArchive(baseURL, apiKey, archive)
-	status, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/zip", map[string]string{
-		"source": stagingPath,
-		"dest":   archive.ArchivePath,
-	})
-	if err := groupFileWorkerError(status, body, err); err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to package plugin staging folder")
-		return
-	}
+	for softwareFolder, softwareTargets := range targetsBySoftware {
+		stagingPath, err := resolveServerScopedPath(proxy.RootPath, path.Join(velocityGroupStagingRelativePath, softwareFolder), false)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Velocity plugin staging path is invalid")
+			return
+		}
+		archive := buildTempArchiveTarget(proxy.RootPath, "plugin-staging-"+softwareFolder)
+		defer s.cleanupWorkerArchive(baseURL, apiKey, archive)
+		status, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/zip", map[string]string{
+			"source": stagingPath,
+			"dest":   archive.ArchivePath,
+		})
+		if err := groupFileWorkerError(status, body, err); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to package plugin staging folder")
+			return
+		}
 
-	archiveQuery := url.Values{"path": {archive.ArchivePath}}.Encode()
-	archiveResp, err := s.callWorkerStream(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/download", archiveQuery, "", nil)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to read plugin staging archive")
-		return
-	}
-	defer archiveResp.Body.Close()
-	if archiveResp.StatusCode < 200 || archiveResp.StatusCode >= 300 {
-		writeError(w, http.StatusBadGateway, "Failed to read plugin staging archive")
-		return
-	}
-	archiveFile, err := os.CreateTemp("", "vestri-plugin-staging-*.zip")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to create temporary plugin archive")
-		return
-	}
-	archiveFileName := archiveFile.Name()
-	defer func() {
+		archiveQuery := url.Values{"path": {archive.ArchivePath}}.Encode()
+		archiveResp, err := s.callWorkerStream(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/download", archiveQuery, "", nil)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to read plugin staging archive")
+			return
+		}
+		if archiveResp.StatusCode < 200 || archiveResp.StatusCode >= 300 {
+			_ = archiveResp.Body.Close()
+			writeError(w, http.StatusBadGateway, "Failed to read plugin staging archive")
+			return
+		}
+		archiveFile, err := os.CreateTemp("", "vestri-plugin-staging-*.zip")
+		if err != nil {
+			_ = archiveResp.Body.Close()
+			writeError(w, http.StatusInternalServerError, "Failed to create temporary plugin archive")
+			return
+		}
+		archiveFileName := archiveFile.Name()
+		if _, err := io.Copy(archiveFile, archiveResp.Body); err != nil {
+			_ = archiveResp.Body.Close()
+			_ = archiveFile.Close()
+			_ = os.Remove(archiveFileName)
+			writeError(w, http.StatusBadGateway, "Failed to receive plugin staging archive")
+			return
+		}
+		_ = archiveResp.Body.Close()
 		_ = archiveFile.Close()
+		if err := s.applyVelocityStagingArchive(r, baseURL, apiKey, archiveFileName, stagingPath, softwareTargets); err != nil {
+			_ = os.Remove(archiveFileName)
+			writeError(w, http.StatusBadGateway, "Plugin apply failed; earlier files or selected backends may already have been updated")
+			return
+		}
 		_ = os.Remove(archiveFileName)
-	}()
-	if _, err := io.Copy(archiveFile, archiveResp.Body); err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to receive plugin staging archive")
-		return
-	}
-
-	if err := s.applyVelocityStagingArchive(r, baseURL, apiKey, archiveFileName, stagingPath, targets); err != nil {
-		writeError(w, http.StatusBadGateway, "Plugin apply failed; earlier files or selected backends may already have been updated")
-		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"appliedTo": len(targets)})
 }
@@ -491,12 +589,35 @@ func (s *Server) applyVelocityStagingArchive(r *http.Request, baseURL *url.URL, 
 		return err
 	}
 	defer archive.Close()
-	if len(archive.File) == 0 {
-		return fmt.Errorf("plugin staging folder is empty")
+	managedFiles := make(map[string]struct{})
+	for _, entry := range archive.File {
+		relativePath, include, err := velocityStagingArchiveRelativePath(entry.Name, stagingPath)
+		if err != nil {
+			return err
+		}
+		if !include {
+			continue
+		}
+		if !entry.FileInfo().IsDir() {
+			if !entry.Mode().IsRegular() {
+				return fmt.Errorf("unsupported archive entry type at %q", entry.Name)
+			}
+			managedFiles[relativePath] = struct{}{}
+		}
+	}
+	for _, target := range targets {
+		pluginPath, err := velocityBackendPluginPath(target.server)
+		if err != nil {
+			return err
+		}
+		if err := ensureWorkerDirectory(r.Context(), s, baseURL, apiKey, pluginPath); err != nil {
+			return err
+		}
 	}
 	for _, entry := range archive.File {
 		relativePath, include, err := velocityStagingArchiveRelativePath(entry.Name, stagingPath)
-		if err != nil {			return err
+		if err != nil {
+			return err
 		}
 		if !include {
 			continue
@@ -512,9 +633,6 @@ func (s *Server) applyVelocityStagingArchive(r *http.Request, baseURL *url.URL, 
 					return err
 				}
 				continue
-			}
-			if !entry.Mode().IsRegular() {
-				return fmt.Errorf("unsupported archive entry type at %q", entry.Name)
 			}
 			parentPath := path.Dir(path.Join(pluginPath, relativePath))
 			if err := ensureWorkerDirectory(r.Context(), s, baseURL, apiKey, parentPath); err != nil {
@@ -562,6 +680,41 @@ func (s *Server) applyVelocityStagingArchive(r *http.Request, baseURL *url.URL, 
 		_ = tempFile.Close()
 		_ = os.Remove(name)
 	}
+	managedFileList := make([]string, 0, len(managedFiles))
+	for relativePath := range managedFiles {
+		managedFileList = append(managedFileList, relativePath)
+	}
+	sort.Strings(managedFileList)
+	for _, target := range targets {
+		previousFiles, err := s.readVelocityManagedPluginFiles(r.Context(), baseURL, apiKey, target.server)
+		if err != nil {
+			return err
+		}
+		for _, relativePath := range previousFiles {
+			if _, stillManaged := managedFiles[relativePath]; stillManaged {
+				continue
+			}
+			fullPath, err := resolveVelocityManagedPluginFile(target.server, relativePath)
+			if err != nil {
+				return err
+			}
+			status, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/delete", map[string]interface{}{
+				"path":      fullPath,
+				"recursive": false,
+			})
+			if err != nil {
+				return err
+			}
+			if status != http.StatusNotFound {
+				if err := groupFileWorkerError(status, body, nil); err != nil {
+					return err
+				}
+			}
+		}
+		if err := s.writeVelocityManagedPluginFiles(r.Context(), baseURL, apiKey, target.server, managedFileList); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -575,7 +728,9 @@ func velocityStagingArchiveRelativePath(entryName, stagingPath string) (string, 
 	}
 	prefixes := []string{
 		path.Clean(strings.TrimLeft(stagingPath, "/")),
+		path.Join(path.Base(velocityGroupStagingRelativePath), path.Base(stagingPath)),
 		path.Clean(velocityGroupStagingRelativePath),
+		path.Base(stagingPath),
 		path.Base(velocityGroupStagingRelativePath),
 	}
 	for _, prefix := range prefixes {
@@ -598,6 +753,58 @@ func velocityStagingArchiveRelativePath(entryName, stagingPath string) (string, 
 		return "", false, fmt.Errorf("unsafe plugin archive path %q", entryName)
 	}
 	return cleaned, true, nil
+}
+
+type velocityManagedPluginFilesManifest struct {
+	Files []string `json:"files"`
+}
+
+func velocityManagedPluginManifestPath(server auth.GameServer) string {
+	return path.Join(server.RootPath, "data", velocityManagedPluginManifestName)
+}
+
+func resolveVelocityManagedPluginFile(server auth.GameServer, relativePath string) (string, error) {
+	cleaned := path.Clean(strings.TrimLeft(strings.ReplaceAll(strings.TrimSpace(relativePath), "\\", "/"), "/"))
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
+		return "", fmt.Errorf("unsafe managed plugin path %q", relativePath)
+	}
+	return resolveServerScopedPath(server.RootPath, path.Join("data", "plugins", cleaned), false)
+}
+
+func (s *Server) readVelocityManagedPluginFiles(ctx context.Context, baseURL *url.URL, apiKey string, server auth.GameServer) ([]string, error) {
+	query := url.Values{"path": {velocityManagedPluginManifestPath(server)}}.Encode()
+	status, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, "/fs/read?"+query, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("failed to read managed plugin manifest (%d): %s", status, strings.TrimSpace(string(body)))
+	}
+	var manifest velocityManagedPluginFilesManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return nil, fmt.Errorf("invalid managed plugin manifest: %w", err)
+	}
+	for _, relativePath := range manifest.Files {
+		if _, err := resolveVelocityManagedPluginFile(server, relativePath); err != nil {
+			return nil, err
+		}
+	}
+	return manifest.Files, nil
+}
+
+func (s *Server) writeVelocityManagedPluginFiles(ctx context.Context, baseURL *url.URL, apiKey string, server auth.GameServer, files []string) error {
+	content, err := json.Marshal(velocityManagedPluginFilesManifest{Files: files})
+	if err != nil {
+		return err
+	}
+	status, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodPost, "/fs/write", map[string]string{
+		"path":    velocityManagedPluginManifestPath(server),
+		"content": string(content),
+	})
+	return groupFileWorkerError(status, body, err)
 }
 
 func ensureWorkerDirectory(ctx context.Context, s *Server, baseURL *url.URL, apiKey, targetPath string) error {
