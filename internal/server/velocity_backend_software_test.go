@@ -64,3 +64,34 @@ func TestVelocityBackendPluginPath(t *testing.T) {
 		t.Fatal("expected vanilla backend to be rejected for plugin apply")
 	}
 }
+
+func TestVelocityStagingArchiveRelativePath(t *testing.T) {
+	testCases := []struct {
+		name      string
+		entryName string
+		want      string
+		include   bool
+		wantError bool
+	}{
+		{name: "strips staging folder root", entryName: "vestri-plugin-staging/ExtraPlugin.jar", want: "ExtraPlugin.jar", include: true},
+		{name: "strips data staging prefix", entryName: "data/vestri-plugin-staging/config/paper/global.yml", want: "config/paper/global.yml", include: true},
+		{name: "keeps nested plugin paths", entryName: "LuckPerms/translations/de.yml", want: "LuckPerms/translations/de.yml", include: true},
+		{name: "skips staging directory entry", entryName: "vestri-plugin-staging/", include: false},
+		{name: "rejects traversal", entryName: "../outside.jar", wantError: true},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, include, err := velocityStagingArchiveRelativePath(testCase.entryName, "proxy/data/vestri-plugin-staging")
+			if (err != nil) != testCase.wantError {
+				t.Fatalf("expected error=%v, got %v", testCase.wantError, err)
+			}
+			if got != testCase.want {
+				t.Fatalf("expected relative path %q, got %q", testCase.want, got)
+			}
+			if include != testCase.include {
+				t.Fatalf("expected include=%v, got %v", testCase.include, include)
+			}
+		})
+	}
+}

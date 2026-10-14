@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
@@ -469,16 +470,9 @@ func (s *Server) handleApplyVelocityGroupFiles(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	for _, target := range targets {
-		pluginPath, err := velocityBackendPluginPath(target.server)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if err := s.applyPluginArchiveToBackend(r, baseURL, apiKey, archiveFile, target.server, pluginPath); err != nil {
-			writeError(w, http.StatusBadGateway, "Plugin apply failed; earlier selected backends may already have been updated")
-			return
-		}
+	if err := s.applyVelocityStagingArchive(r, baseURL, apiKey, archiveFileName, stagingPath, targets); err != nil {
+		writeError(w, http.StatusBadGateway, "Plugin apply failed; earlier files or selected backends may already have been updated")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"appliedTo": len(targets)})
 }
@@ -491,24 +485,133 @@ func velocityBackendPluginPath(server auth.GameServer) (string, error) {
 	return path.Join(server.RootPath, "data", "plugins"), nil
 }
 
-func (s *Server) applyPluginArchiveToBackend(r *http.Request, baseURL *url.URL, apiKey string, archiveFile *os.File, server auth.GameServer, pluginPath string) error {
-	status, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/mkdir", map[string]interface{}{
-		"path":      pluginPath,
+func (s *Server) applyVelocityStagingArchive(r *http.Request, baseURL *url.URL, apiKey, archiveName, stagingPath string, targets []velocityGroupFileTarget) error {
+	archive, err := zip.OpenReader(archiveName)
+	if err != nil {
+		return err
+	}
+	defer archive.Close()
+	if len(archive.File) == 0 {
+		return fmt.Errorf("plugin staging folder is empty")
+	}
+	for _, entry := range archive.File {
+		relativePath, include, err := velocityStagingArchiveRelativePath(entry.Name, stagingPath)
+		if err != nil {			return err
+		}
+		if !include {
+			continue
+		}
+		for _, target := range targets {
+			pluginPath, err := velocityBackendPluginPath(target.server)
+			if err != nil {
+				return err
+			}
+			targetPath := path.Join(pluginPath, relativePath)
+			if entry.FileInfo().IsDir() {
+				if err := ensureWorkerDirectory(r.Context(), s, baseURL, apiKey, targetPath); err != nil {
+					return err
+				}
+				continue
+			}
+			if !entry.Mode().IsRegular() {
+				return fmt.Errorf("unsupported archive entry type at %q", entry.Name)
+			}
+			parentPath := path.Dir(path.Join(pluginPath, relativePath))
+			if err := ensureWorkerDirectory(r.Context(), s, baseURL, apiKey, parentPath); err != nil {
+				return err
+			}
+		}
+		if entry.FileInfo().IsDir() {
+			continue
+		}
+		tempFile, err := os.CreateTemp("", "vestri-plugin-entry-*")
+		if err != nil {
+			return err
+		}
+		entryReader, err := entry.Open()
+		if err != nil {
+			_ = tempFile.Close()
+			_ = os.Remove(tempFile.Name())
+			return err
+		}
+		_, copyErr := io.Copy(tempFile, entryReader)
+		closeEntryErr := entryReader.Close()
+		if copyErr != nil || closeEntryErr != nil {
+			_ = tempFile.Close()
+			_ = os.Remove(tempFile.Name())
+			if copyErr != nil {
+				return copyErr
+			}
+			return closeEntryErr
+		}
+		for _, target := range targets {
+			pluginPath, err := velocityBackendPluginPath(target.server)
+			if err != nil {
+				_ = tempFile.Close()
+				_ = os.Remove(tempFile.Name())
+				return err
+			}
+			fullTargetPath := path.Join(pluginPath, relativePath)
+			if err := s.streamGroupUploadToWorker(r, baseURL, apiKey, tempFile, fullTargetPath, path.Base(relativePath)); err != nil {
+				_ = tempFile.Close()
+				_ = os.Remove(tempFile.Name())
+				return err
+			}
+		}
+		name := tempFile.Name()
+		_ = tempFile.Close()
+		_ = os.Remove(name)
+	}
+	return nil
+}
+
+func velocityStagingArchiveRelativePath(entryName, stagingPath string) (string, bool, error) {
+	cleaned := path.Clean(strings.TrimLeft(strings.ReplaceAll(entryName, "\\", "/"), "/"))
+	if cleaned == "." || cleaned == "" {
+		return "", false, nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", false, fmt.Errorf("unsafe plugin archive path %q", entryName)
+	}
+	prefixes := []string{
+		path.Clean(strings.TrimLeft(stagingPath, "/")),
+		path.Clean(velocityGroupStagingRelativePath),
+		path.Base(velocityGroupStagingRelativePath),
+	}
+	for _, prefix := range prefixes {
+		if prefix == "." || prefix == "" {
+			continue
+		}
+		if cleaned == prefix {
+			return "", false, nil
+		}
+		if strings.HasPrefix(cleaned, prefix+"/") {
+			cleaned = strings.TrimPrefix(cleaned, prefix+"/")
+			break
+		}
+	}
+	cleaned = path.Clean(cleaned)
+	if cleaned == "." || cleaned == "" {
+		return "", false, nil
+	}
+	if path.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", false, fmt.Errorf("unsafe plugin archive path %q", entryName)
+	}
+	return cleaned, true, nil
+}
+
+func ensureWorkerDirectory(ctx context.Context, s *Server, baseURL *url.URL, apiKey, targetPath string) error {
+	status, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodPost, "/fs/mkdir", map[string]interface{}{
+		"path":      targetPath,
 		"exclusive": false,
 	})
-	if err := groupFileWorkerError(status, body, err); err != nil && status != http.StatusConflict {
+	if err != nil {
 		return err
 	}
-	targetArchive := buildTempArchiveTarget(server.RootPath, "group-plugins")
-	defer s.cleanupWorkerArchive(baseURL, apiKey, targetArchive)
-	if err := s.streamGroupUploadToWorker(r, baseURL, apiKey, archiveFile, targetArchive.ArchivePath, "plugins.zip"); err != nil {
-		return err
+	if status == http.StatusConflict || status >= 200 && status < 300 {
+		return nil
 	}
-	status, body, err = s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/unzip", map[string]string{
-		"source": targetArchive.ArchivePath,
-		"dest":   pluginPath,
-	})
-	return groupFileWorkerError(status, body, err)
+	return fmt.Errorf("worker /fs/mkdir failed (%d): %s", status, strings.TrimSpace(string(body)))
 }
 
 func (s *Server) streamGroupUploadToWorker(r *http.Request, baseURL *url.URL, apiKey string, upload *os.File, fullPath, uploadName string) error {
