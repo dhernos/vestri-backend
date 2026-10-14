@@ -17,8 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"yourapp/internal/auth"
+
+	"github.com/go-chi/chi/v5"
 )
 
 const (
