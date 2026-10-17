@@ -35,6 +35,53 @@ func TestResolveMinecraftComposeTemplateUsesVanillaForVelocity(t *testing.T) {
 	}
 }
 
+func TestNormalizeCurseForgeModpackURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "download link becomes pinned file URL",
+			input: "https://www.curseforge.com/minecraft/modpacks/all-the-mods-10/download/9190182",
+			want:  "https://www.curseforge.com/minecraft/modpacks/all-the-mods-10/files/9190182",
+		},
+		{
+			name:  "file link stays pinned",
+			input: "https://www.curseforge.com/minecraft/modpacks/all-the-mods-10/files/9190182",
+			want:  "https://www.curseforge.com/minecraft/modpacks/all-the-mods-10/files/9190182",
+		},
+		{name: "wrong host", input: "https://evil.example/minecraft/modpacks/pack/files/123", wantErr: true},
+		{name: "non-https", input: "http://www.curseforge.com/minecraft/modpacks/pack/files/123", wantErr: true},
+		{name: "project page without file", input: "https://www.curseforge.com/minecraft/modpacks/pack", wantErr: true},
+		{name: "query string", input: "https://www.curseforge.com/minecraft/modpacks/pack/files/123?next=evil", wantErr: true},
+		{name: "user info", input: "https://evil@www.curseforge.com/minecraft/modpacks/pack/files/123", wantErr: true},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := normalizeCurseForgeModpackURL(test.input)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected URL validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected URL validation error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("normalized URL=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestMinecraftServerJarFileNameForArtifactPreservesArtifactName(t *testing.T) {
 	artifact := &minecraftServerArtifact{FileName: "velocity-3.4.0.jar"}
 	name, err := minecraftServerJarFileNameForArtifact(artifact)

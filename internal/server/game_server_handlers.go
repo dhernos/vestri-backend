@@ -25,6 +25,7 @@ const (
 	maxWorkerResponseBytes = 8 << 20
 	maxRemoteComposeBytes  = 2 << 20
 	vanillaTemplateID      = "minecraft-vanilla"
+	curseForgeTemplateID   = "minecraft-curseforge"
 	defaultVelocityPort    = 25577
 	defaultMinecraftPort   = 25565
 	minecraftEULAConfigID  = "eula"
@@ -50,6 +51,7 @@ type createGameServerRequest struct {
 	AgreementAccepted bool   `json:"agreementAccepted"`
 	SoftwareVersion   string `json:"softwareVersion"`
 	GameVersion       string `json:"gameVersion"`
+	CurseForgeURL     string `json:"curseForgeUrl"`
 	ParentServerRef   string `json:"parentServerRef"`
 }
 
@@ -292,6 +294,17 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "Game server template not found")
 		return
 	}
+	curseForgeURL := ""
+	if template.ID == curseForgeTemplateID {
+		curseForgeURL, err = normalizeCurseForgeModpackURL(req.CurseForgeURL)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "A valid CurseForge modpack file URL is required")
+			return
+		}
+	} else if strings.TrimSpace(req.CurseForgeURL) != "" {
+		writeError(w, http.StatusBadRequest, "CurseForge URL is only supported by the CurseForge modpack template")
+		return
+	}
 	template.VersionConfig = cloneTemplateVersions(template.VersionConfig)
 	s.enrichTemplateVersionConfig(r.Context(), template)
 
@@ -332,6 +345,9 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		gameVersion = minecraftArtifact.Version
+	}
+	if template.ID == curseForgeTemplateID {
+		softwareVersion = "CURSEFORGE"
 	}
 
 	composeTemplate, err := resolveMinecraftComposeTemplate(template)
@@ -428,6 +444,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		"MINECRAFT_SERVER_JAR_NAME":   minecraftServerJarName,
 		"MINECRAFT_JAVA_ARGS":         defaultMinecraftJavaArgs,
 		"MINECRAFT_SERVER_START_ARGS": minecraftServerStartArgs,
+		"CURSEFORGE_URL":             curseForgeURL,
 	}
 
 	metadata := gameServerStoredMetadata{

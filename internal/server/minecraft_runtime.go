@@ -62,6 +62,7 @@ const (
 var (
 	stableMinecraftVersionPattern = regexp.MustCompile(`^\d+\.\d+(\.\d+)?$`)
 	looseVersionTokenPattern      = regexp.MustCompile(`[0-9]+|[A-Za-z]+`)
+	curseForgeModpackURLPattern   = regexp.MustCompile(`^/minecraft/modpacks/([a-z0-9-]+)/(download|files)/([0-9]+)$`)
 	externalAPIFetchClient        = &http.Client{Timeout: 30 * time.Second}
 	minecraftVersionCache         = softwareVersionListCache{
 		entries: make(map[string]softwareVersionListCacheEntry),
@@ -186,7 +187,22 @@ func shouldProvisionMinecraftServerArtifact(template *gameServerTemplate) bool {
 	if template == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(template.Game), "minecraft")
+	return strings.EqualFold(strings.TrimSpace(template.Game), "minecraft") && template.ID != curseForgeTemplateID
+}
+
+func normalizeCurseForgeModpackURL(value string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") ||
+		!strings.EqualFold(parsed.Host, "www.curseforge.com") || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("invalid CurseForge modpack URL")
+	}
+
+	matches := curseForgeModpackURLPattern.FindStringSubmatch(parsed.Path)
+	if len(matches) != 4 {
+		return "", fmt.Errorf("URL must identify a CurseForge Minecraft modpack file")
+	}
+	return "https://www.curseforge.com/minecraft/modpacks/" + matches[1] + "/files/" + matches[3], nil
 }
 
 func normalizeMinecraftSoftware(value string) string {
