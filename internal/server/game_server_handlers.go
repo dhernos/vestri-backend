@@ -416,6 +416,12 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		defer cancel()
 		_ = s.workerDeletePath(cleanupCtx, baseURL, apiKey, rootPath, true)
 	}()
+	if strings.EqualFold(strings.TrimSpace(template.Game), "satisfactory") {
+		if err := s.ensureSatisfactoryBlueprintDirectory(r.Context(), baseURL, apiKey); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to prepare shared Satisfactory blueprint folder")
+			return
+		}
+	}
 
 	minecraftServerJarName := defaultMinecraftServerJarFile
 	if shouldProvisionMinecraftArtifact {
