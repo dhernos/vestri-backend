@@ -5,21 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"yourapp/internal/auth"
 )
 
 const (
-	satisfactoryBlueprintTargetPath  = "data/saved/SaveGames/blueprints"
+	satisfactoryBlueprintTargetPath  = "data/saved/blueprints"
 	maxSatisfactoryBlueprintBytes    = 64 << 20
 )
 
@@ -28,8 +31,22 @@ func satisfactoryBlueprintLibraryPath(nodeID string) string {
 }
 
 var (
-	satisfactoryBlueprintPageClient = &http.Client{
+	satisfactoryBlueprintIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	satisfactoryCalculatorIDPattern = regexp.MustCompile(`^/en/blueprints/index/details/id/([0-9]+)(?:/|$)`)
+	satisfactoryCalculatorDirectDownloadPattern = regexp.MustCompile(`^/en/blueprints/index/download(?:-cfg)?/id/([0-9]+)(?:/|$)`)
+	satisfactoryCalculatorDownloadPattern = regexp.MustCompile(`href=["'](?:https://(?:www\.)?satisfactory-calculator\.com)?(/en/blueprints/index/download(-cfg)?/id/([0-9]+)(?:/[^"']*)?)["']`)
+)
+
+type satisfactoryBlueprintFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+func newSatisfactoryBlueprintHTTPClient() *http.Client {
+	jar, _ := cookiejar.New(nil)
+	return &http.Client{
 		Timeout: 30 * time.Second,
+		Jar:     jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 4 || !isAllowedSatisfactoryBlueprintURL(req.URL) {
 				return http.ErrUseLastResponse
@@ -37,15 +54,6 @@ var (
 			return nil
 		},
 	}
-	satisfactoryBlueprintIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	satisfactoryCalculatorIDPattern = regexp.MustCompile(`^/en/blueprints/index/details/id/([0-9]+)(?:/|$)`)
-	satisfactoryCalculatorDirectDownloadPattern = regexp.MustCompile(`^/en/blueprints/index/download/id/([0-9]+)(?:/|$)`)
-	satisfactoryCalculatorDownloadPattern = regexp.MustCompile(`href=["'](?:https://satisfactory-calculator\.com)?(/en/blueprints/index/download/id/([0-9]+)(?:/[^"']*)?)["']`)
-)
-
-type satisfactoryBlueprintFile struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
 }
 
 func (s *Server) loadSatisfactoryBlueprintNodeForRequest(w http.ResponseWriter, r *http.Request) (*auth.WorkerNode, bool) {
@@ -125,7 +133,11 @@ func (s *Server) handleListSatisfactoryBlueprints(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadGateway, "Failed to list shared blueprints")
 		return
 	}
-	installedDir := satisfactoryBlueprintServerDirectory(gameServer)
+	installedDir, err := s.satisfactoryBlueprintServerDirectory(r.Context(), baseURL, apiKey, gameServer)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to resolve the Satisfactory server name")
+		return
+	}
 	installed, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, installedDir)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to list installed blueprints")
@@ -248,7 +260,8 @@ func (s *Server) handleImportSatisfactoryBlueprint(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	downloadURL, filename, err := satisfactoryBlueprintDownloadForPage(r.Context(), req.URL)
+	blueprintClient := newSatisfactoryBlueprintHTTPClient()
+	downloadURL, filename, err := satisfactoryBlueprintDownloadForPage(r.Context(), req.URL, blueprintClient)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -258,17 +271,26 @@ func (s *Server) handleImportSatisfactoryBlueprint(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "Invalid blueprint source")
 		return
 	}
-	request.Header.Set("User-Agent", "vestri-blueprint-import/1")
-	response, err := satisfactoryBlueprintPageClient.Do(request)
+	request.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	request.Header.Set("Accept", "application/octet-stream, */*")
+	if referer, parseErr := url.Parse(strings.TrimSpace(req.URL)); parseErr == nil && isAllowedSatisfactoryBlueprintURL(referer) {
+		request.Header.Set("Referer", referer.String())
+	}
+	response, err := blueprintClient.Do(request)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to download blueprint from the approved source")
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		writeError(w, http.StatusBadGateway, "The approved blueprint source did not provide a download")
+		message := fmt.Sprintf("The approved blueprint source returned HTTP %d", response.StatusCode)
+		if detail := readWorkerErrorText(response.Body); detail != "" {
+			message += ": " + detail
+		}
+		writeError(w, http.StatusBadGateway, message)
 		return
 	}
+	filename = satisfactoryBlueprintResponseFilename(response, filename)
 	if response.ContentLength > maxSatisfactoryBlueprintBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, "Blueprint exceeds the 64 MiB limit")
 		return
@@ -330,7 +352,11 @@ func (s *Server) handleInstallSatisfactoryBlueprint(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
-	installedDir := satisfactoryBlueprintServerDirectory(gameServer)
+	installedDir, err := s.satisfactoryBlueprintServerDirectory(r.Context(), baseURL, apiKey, gameServer)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to resolve the Satisfactory server name")
+		return
+	}
 	destination := path.Join(installedDir, name)
 	installed, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, installedDir)
 	if err != nil {
@@ -435,6 +461,77 @@ func (s *Server) listSatisfactoryBlueprintFiles(ctx context.Context, baseURL *ur
 	return files, nil
 }
 
+func (s *Server) satisfactoryBlueprintServerDirectory(ctx context.Context, baseURL *url.URL, apiKey string, gameServer *auth.GameServer) (string, error) {
+	serverName := strings.TrimSpace(gameServer.Name)
+	settingsPath := path.Join(gameServer.RootPath, "data/FactoryGame/Saved/Config/LinuxServer/ServerSettings.ini")
+	statusCode, settingsContent, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, "/fs/read?path="+url.QueryEscape(settingsPath), nil)
+	if err == nil && statusCode >= 200 && statusCode < 300 {
+		if configuredName := satisfactoryServerNameFromSettings(string(settingsContent)); configuredName != "" {
+			serverName = configuredName
+		}
+	}
+	serverName = strings.TrimSpace(serverName)
+	if !safeSatisfactoryDirectoryName(serverName) {
+		return "", fmt.Errorf("server name is not a safe path segment")
+	}
+	return path.Join(gameServer.RootPath, satisfactoryBlueprintTargetPath, serverName), nil
+}
+
+func satisfactoryServerNameFromSettings(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if found && strings.EqualFold(strings.TrimSpace(key), "ServerName") {
+			return strings.Trim(strings.TrimSpace(value), "\"'")
+		}
+	}
+	return ""
+}
+
+func safeSatisfactoryDirectoryName(name string) bool {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		return false
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func satisfactoryBlueprintFilename(contentDisposition, fallback string) string {
+	name, ok := satisfactoryBlueprintFilenameFromDisposition(contentDisposition, path.Ext(fallback))
+	if !ok {
+		return fallback
+	}
+	return name
+}
+
+func satisfactoryBlueprintResponseFilename(response *http.Response, fallback string) string {
+	for current := response; current != nil; {
+		if name, ok := satisfactoryBlueprintFilenameFromDisposition(current.Header.Get("Content-Disposition"), path.Ext(fallback)); ok {
+			return name
+		}
+		if current.Request == nil || current.Request.Response == nil {
+			break
+		}
+		current = current.Request.Response
+	}
+	return fallback
+}
+
+func satisfactoryBlueprintFilenameFromDisposition(contentDisposition, expectedExtension string) (string, bool) {
+	_, params, err := mime.ParseMediaType(contentDisposition)
+	if err != nil {
+		return "", false
+	}
+	name := strings.TrimSpace(params["filename"])
+	if _, ok := safeSatisfactoryBlueprintName(name); !ok || !strings.EqualFold(path.Ext(name), expectedExtension) {
+		return "", false
+	}
+	return name, true
+}
+
 func (s *Server) uploadSatisfactoryBlueprintToWorker(ctx context.Context, node *auth.WorkerNode, upload *os.File, filename string) error {
 	baseURL, apiKey, err := s.workerTargetFromNode(node)
 	if err != nil {
@@ -464,7 +561,7 @@ func (s *Server) uploadSatisfactoryBlueprintToWorker(ctx context.Context, node *
 	return writeErr
 }
 
-func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string) (*url.URL, string, error) {
+func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string, client *http.Client) (*url.URL, string, error) {
 	page, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || !isAllowedSatisfactoryBlueprintURL(page) || page.Fragment != "" {
 		return nil, "", fmt.Errorf("URL must be an HTTPS blueprint page from one of the approved sites")
@@ -473,7 +570,7 @@ func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string) (*url
 	var download *url.URL
 	var filename string
 	switch host {
-	case "satisfactoryblueprints.com":
+	case "satisfactoryblueprints.com", "www.satisfactoryblueprints.com":
 		if page.Port() != "" {
 			return nil, "", fmt.Errorf("URL must use the standard HTTPS port")
 		}
@@ -491,13 +588,17 @@ func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string) (*url
 		} else {
 			return nil, "", fmt.Errorf("URL must identify a Satisfactory Blueprints detail or download page")
 		}
-	case "satisfactory-calculator.com":
+	case "satisfactory-calculator.com", "www.satisfactory-calculator.com":
 		if page.Port() != "" {
 			return nil, "", fmt.Errorf("URL must use the standard HTTPS port")
 		}
 		if matches := satisfactoryCalculatorDirectDownloadPattern.FindStringSubmatch(page.Path); len(matches) == 2 {
 			download = page
-			filename = "blueprint-" + matches[1] + ".sbp"
+			ext := ".sbp"
+			if strings.Contains(page.Path, "/download-cfg/") {
+				ext = ".sbpcfg"
+			}
+			filename = "blueprint-" + matches[1] + ext
 			break
 		}
 		matches := satisfactoryCalculatorIDPattern.FindStringSubmatch(page.Path)
@@ -508,8 +609,8 @@ func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string) (*url
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid blueprint page URL")
 		}
-		request.Header.Set("User-Agent", "vestri-blueprint-import/1")
-		response, err := satisfactoryBlueprintPageClient.Do(request)
+		request.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+		response, err := client.Do(request)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to read the approved blueprint page")
 		}
@@ -522,17 +623,22 @@ func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string) (*url
 			return nil, "", fmt.Errorf("failed to read the approved blueprint page")
 		}
 		anchor := satisfactoryCalculatorDownloadPattern.FindSubmatch(pageBody)
-		if len(anchor) != 3 || string(anchor[2]) != matches[1] {
+		if len(anchor) != 4 || string(anchor[3]) != matches[1] {
 			return nil, "", fmt.Errorf("blueprint download link was not found on the approved page")
 		}
 		link := strings.ReplaceAll(string(anchor[1]), "&amp;", "&")
 		download, err = page.Parse(link)
-		if err != nil || !isAllowedSatisfactoryBlueprintURL(download) || !strings.Contains(download.Path, "/index/download/id/"+matches[1]+"/") {
+		if err != nil || !isAllowedSatisfactoryBlueprintURL(download) || !strings.Contains(download.Path, "/index/download") || !strings.Contains(download.Path, "/id/"+matches[1]+"/") {
 			return nil, "", fmt.Errorf("blueprint download URL is not approved")
 		}
-		filename = "blueprint-" + matches[1] + ".sbp"
+		ext := ".sbp"
+		if strings.Contains(download.Path, "/download-cfg/") {
+			ext = ".sbpcfg"
+		}
+		filename = "blueprint-" + matches[1] + ext
 	case "static.satisfactory-calculator.com":
-		if page.Port() != "" || !strings.HasPrefix(page.Path, "/data/blueprintsData/") || strings.ToLower(path.Ext(page.Path)) != ".sbp" {
+		ext := strings.ToLower(path.Ext(page.Path))
+		if page.Port() != "" || !strings.HasPrefix(page.Path, "/data/blueprintsData/") || (ext != ".sbp" && ext != ".sbpcfg") {
 			return nil, "", fmt.Errorf("URL must identify a Satisfactory Calculator blueprint file")
 		}
 		download = page
@@ -554,7 +660,7 @@ func isAllowedSatisfactoryBlueprintURL(value *url.URL) bool {
 		return false
 	}
 	switch strings.ToLower(value.Hostname()) {
-	case "satisfactoryblueprints.com", "satisfactory-calculator.com", "static.satisfactory-calculator.com":
+	case "satisfactoryblueprints.com", "www.satisfactoryblueprints.com", "satisfactory-calculator.com", "www.satisfactory-calculator.com", "static.satisfactory-calculator.com":
 		return true
 	default:
 		return false
@@ -575,8 +681,4 @@ func safeSatisfactoryBlueprintName(value string) (string, bool) {
 
 func isSatisfactoryBlueprintServer(templateID string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(templateID)), "satisfactory-")
-}
-
-func satisfactoryBlueprintServerDirectory(gameServer *auth.GameServer) string {
-	return path.Join(gameServer.RootPath, satisfactoryBlueprintTargetPath, gameServer.Slug)
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"testing"
 )
@@ -73,6 +74,12 @@ func TestSatisfactoryBlueprintDownloadForPageDirectURLs(t *testing.T) {
 			wantFilename: "blueprint-12911.sbp",
 		},
 		{
+			name:         "calculator direct config file",
+			input:        "https://satisfactory-calculator.com/en/blueprints/index/download-cfg/id/12911/name/blueprint",
+			wantURL:      "https://satisfactory-calculator.com/en/blueprints/index/download-cfg/id/12911/name/blueprint",
+			wantFilename: "blueprint-12911.sbpcfg",
+		},
+		{
 			name:         "calculator CDN direct file",
 			input:        "https://static.satisfactory-calculator.com/data/blueprintsData/0/a/test.sbp?version=1",
 			wantURL:      "https://static.satisfactory-calculator.com/data/blueprintsData/0/a/test.sbp?version=1",
@@ -93,7 +100,7 @@ func TestSatisfactoryBlueprintDownloadForPageDirectURLs(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			gotURL, gotFilename, err := satisfactoryBlueprintDownloadForPage(context.Background(), test.input)
+			gotURL, gotFilename, err := satisfactoryBlueprintDownloadForPage(context.Background(), test.input, newSatisfactoryBlueprintHTTPClient())
 			if test.wantErr {
 				if err == nil {
 					t.Fatal("expected URL validation error")
@@ -110,6 +117,45 @@ func TestSatisfactoryBlueprintDownloadForPageDirectURLs(t *testing.T) {
 				t.Errorf("filename = %q, want %q", gotFilename, test.wantFilename)
 			}
 		})
+	}
+}
+
+func TestSatisfactoryBlueprintFilenamePrefersResponseTitle(t *testing.T) {
+	t.Parallel()
+
+	got := satisfactoryBlueprintFilename(`attachment; filename="Hovering Train Node.sbp"`, "blueprint-06e29a92.sbp")
+	if got != "Hovering Train Node.sbp" {
+		t.Fatalf("filename = %q, want source title", got)
+	}
+	got = satisfactoryBlueprintFilename(`attachment; filename="not-a-blueprint.html"`, "blueprint-12911.sbp")
+	if got != "blueprint-12911.sbp" {
+		t.Fatalf("invalid response filename = %q, want fallback", got)
+	}
+}
+
+func TestSatisfactoryBlueprintFilenameUsesRedirectHeader(t *testing.T) {
+	t.Parallel()
+
+	redirect := &http.Response{Header: http.Header{"Content-Disposition": {`attachment; filename="Smelter Manifold.sbp"`}}}
+	final := &http.Response{
+		Header:  make(http.Header),
+		Request: &http.Request{Response: redirect},
+	}
+	got := satisfactoryBlueprintResponseFilename(final, "blueprint-12911.sbp")
+	if got != "Smelter Manifold.sbp" {
+		t.Fatalf("filename = %q, want redirect response title", got)
+	}
+}
+
+func TestSatisfactoryServerNameFromSettings(t *testing.T) {
+	t.Parallel()
+
+	got := satisfactoryServerNameFromSettings("[/Script/FactoryGame.FGServerSettings]\nServerName=FICSIT Central\n")
+	if got != "FICSIT Central" {
+		t.Fatalf("configured server name = %q", got)
+	}
+	if !safeSatisfactoryDirectoryName(got) || safeSatisfactoryDirectoryName("../escape") {
+		t.Fatal("server-name path validation failed")
 	}
 }
 
