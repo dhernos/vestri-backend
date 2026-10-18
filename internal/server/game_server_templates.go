@@ -412,6 +412,17 @@ func configFilesToResponse(values []gameServerTemplateConfigFile) []gameServerCo
 	return result
 }
 
+func withoutObsoleteSatisfactoryServerSettings(values []gameServerTemplateConfigFile) []gameServerTemplateConfigFile {
+	result := make([]gameServerTemplateConfigFile, 0, len(values))
+	for _, cfg := range values {
+		if cfg.ID == "server-settings" && cfg.Path == "data/FactoryGame/Saved/Config/LinuxServer/ServerSettings.ini" {
+			continue
+		}
+		result = append(result, cfg)
+	}
+	return result
+}
+
 func parseGameServerMetadata(raw json.RawMessage) gameServerStoredMetadata {
 	metadata := gameServerStoredMetadata{}
 	if len(raw) == 0 {

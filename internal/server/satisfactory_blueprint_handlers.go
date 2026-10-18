@@ -23,7 +23,7 @@ import (
 
 const (
 	satisfactoryBlueprintTargetPath  = "data/saved/blueprints"
-	satisfactoryServerSavePath       = "data/saved/SaveGames/server"
+	satisfactoryServerSavePath       = "data/saved/server"
 	maxSatisfactoryBlueprintBytes    = 64 << 20
 )
 
@@ -36,6 +36,7 @@ var (
 	satisfactoryCalculatorIDPattern = regexp.MustCompile(`^/en/blueprints/index/details/id/([0-9]+)(?:/|$)`)
 	satisfactoryCalculatorDirectDownloadPattern = regexp.MustCompile(`^/en/blueprints/index/download(?:-cfg)?/id/([0-9]+)(?:/|$)`)
 	satisfactoryCalculatorDownloadPattern = regexp.MustCompile(`href=["'](?:https://(?:www\.)?satisfactory-calculator\.com)?(/en/blueprints/index/download(-cfg)?/id/([0-9]+)(?:/[^"']*)?)["']`)
+	satisfactoryAutosaveNamePattern = regexp.MustCompile(`(?i)^(.+)_autosave_[0-9]+\.sav$`)
 )
 
 type satisfactoryBlueprintFile struct {
@@ -46,6 +47,7 @@ type satisfactoryBlueprintFile struct {
 type satisfactoryWorkerEntry struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
+	Size int64  `json:"size"`
 }
 
 func newSatisfactoryBlueprintHTTPClient() *http.Client {
@@ -139,20 +141,26 @@ func (s *Server) handleListSatisfactoryBlueprints(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadGateway, "Failed to list shared blueprints")
 		return
 	}
-	installedDir, err := s.satisfactoryBlueprintServerDirectory(r.Context(), baseURL, apiKey, gameServer)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to resolve the Satisfactory server name")
-		return
-	}
-	installed, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, installedDir)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to list installed blueprints")
-		return
-	}
 	serverReady, err := s.satisfactoryServerHasCreatedSession(r.Context(), baseURL, apiKey, gameServer)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to check whether a Satisfactory game session has been created")
 		return
+	}
+	installed := []satisfactoryBlueprintFile{}
+	if serverReady {
+		installedDir, resolved, resolveErr := s.satisfactoryBlueprintServerDirectory(r.Context(), baseURL, apiKey, gameServer)
+		if resolveErr != nil {
+			writeError(w, http.StatusBadGateway, "Failed to resolve the active Satisfactory game session")
+			return
+		}
+		serverReady = resolved
+		if serverReady {
+			installed, err = s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, installedDir)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "Failed to list installed blueprints")
+				return
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"available": available,
@@ -373,9 +381,13 @@ func (s *Server) handleInstallSatisfactoryBlueprint(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusConflict, "Create or load a Satisfactory game session in-game before installing blueprints")
 		return
 	}
-	installedDir, err := s.satisfactoryBlueprintServerDirectory(r.Context(), baseURL, apiKey, gameServer)
+	installedDir, resolved, err := s.satisfactoryBlueprintServerDirectory(r.Context(), baseURL, apiKey, gameServer)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to resolve the Satisfactory server name")
+		writeError(w, http.StatusBadGateway, "Failed to resolve the active Satisfactory game session")
+		return
+	}
+	if !resolved {
+		writeError(w, http.StatusConflict, "Create or load a Satisfactory game session and wait for its first autosave before installing blueprints")
 		return
 	}
 	destination := path.Join(installedDir, name)
@@ -454,22 +466,8 @@ func (s *Server) ensureSatisfactoryBlueprintDirectory(ctx context.Context, baseU
 }
 
 func (s *Server) listSatisfactoryBlueprintFiles(ctx context.Context, baseURL *url.URL, apiKey, dir string) ([]satisfactoryBlueprintFile, error) {
-	statusCode, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(dir), nil)
+	entries, err := s.listSatisfactoryWorkerEntries(ctx, baseURL, apiKey, dir)
 	if err != nil {
-		return nil, err
-	}
-	if statusCode == http.StatusNotFound && dir != "" {
-		return []satisfactoryBlueprintFile{}, nil
-	}
-	if statusCode < 200 || statusCode >= 300 {
-		return nil, fmt.Errorf("worker /fs/list failed (%d): %s", statusCode, strings.TrimSpace(string(body)))
-	}
-	var entries []struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-		Size int64  `json:"size"`
-	}
-	if err := json.Unmarshal(body, &entries); err != nil {
 		return nil, err
 	}
 	files := make([]satisfactoryBlueprintFile, 0, len(entries))
@@ -482,20 +480,28 @@ func (s *Server) listSatisfactoryBlueprintFiles(ctx context.Context, baseURL *ur
 	return files, nil
 }
 
-func (s *Server) satisfactoryServerHasCreatedSession(ctx context.Context, baseURL *url.URL, apiKey string, gameServer *auth.GameServer) (bool, error) {
-	saveDir := path.Join(gameServer.RootPath, satisfactoryServerSavePath)
-	statusCode, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(saveDir), nil)
+func (s *Server) listSatisfactoryWorkerEntries(ctx context.Context, baseURL *url.URL, apiKey, dir string) ([]satisfactoryWorkerEntry, error) {
+	statusCode, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(dir), nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if statusCode == http.StatusNotFound {
-		return false, nil
+	if statusCode == http.StatusNotFound && dir != "" {
+		return []satisfactoryWorkerEntry{}, nil
 	}
 	if statusCode < 200 || statusCode >= 300 {
-		return false, fmt.Errorf("worker /fs/list failed (%d): %s", statusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("worker /fs/list failed (%d): %s", statusCode, strings.TrimSpace(string(body)))
 	}
 	var entries []satisfactoryWorkerEntry
 	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (s *Server) satisfactoryServerHasCreatedSession(ctx context.Context, baseURL *url.URL, apiKey string, gameServer *auth.GameServer) (bool, error) {
+	saveDir := path.Join(gameServer.RootPath, satisfactoryServerSavePath)
+	entries, err := s.listSatisfactoryWorkerEntries(ctx, baseURL, apiKey, saveDir)
+	if err != nil {
 		return false, err
 	}
 	return satisfactorySessionSaveExists(entries), nil
@@ -510,30 +516,67 @@ func satisfactorySessionSaveExists(entries []satisfactoryWorkerEntry) bool {
 	return false
 }
 
-func (s *Server) satisfactoryBlueprintServerDirectory(ctx context.Context, baseURL *url.URL, apiKey string, gameServer *auth.GameServer) (string, error) {
-	serverName := strings.TrimSpace(gameServer.Name)
-	settingsPath := path.Join(gameServer.RootPath, "data/FactoryGame/Saved/Config/LinuxServer/ServerSettings.ini")
-	statusCode, settingsContent, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, "/fs/read?path="+url.QueryEscape(settingsPath), nil)
-	if err == nil && statusCode >= 200 && statusCode < 300 {
-		if configuredName := satisfactoryServerNameFromSettings(string(settingsContent)); configuredName != "" {
-			serverName = configuredName
-		}
+func (s *Server) satisfactoryBlueprintServerDirectory(ctx context.Context, baseURL *url.URL, apiKey string, gameServer *auth.GameServer) (string, bool, error) {
+	saveEntries, err := s.listSatisfactoryWorkerEntries(ctx, baseURL, apiKey, path.Join(gameServer.RootPath, satisfactoryServerSavePath))
+	if err != nil {
+		return "", false, err
 	}
-	serverName = strings.TrimSpace(serverName)
-	if !safeSatisfactoryDirectoryName(serverName) {
-		return "", fmt.Errorf("server name is not a safe path segment")
+	if !satisfactorySessionSaveExists(saveEntries) {
+		return "", false, nil
 	}
-	return path.Join(gameServer.RootPath, satisfactoryBlueprintTargetPath, serverName), nil
+
+	sessionName, hasAutosaveSession := satisfactorySessionNameFromAutosaves(saveEntries)
+	blueprintRoot := path.Join(gameServer.RootPath, satisfactoryBlueprintTargetPath)
+	blueprintEntries, err := s.listSatisfactoryWorkerEntries(ctx, baseURL, apiKey, blueprintRoot)
+	if err != nil {
+		return "", false, err
+	}
+	blueprintSessionName, hasBlueprintSession := satisfactorySingleBlueprintSessionDirectory(blueprintEntries)
+
+	if hasAutosaveSession {
+		return path.Join(blueprintRoot, sessionName), true, nil
+	}
+	if hasBlueprintSession {
+		return path.Join(blueprintRoot, blueprintSessionName), true, nil
+	}
+	return "", false, nil
 }
 
-func satisfactoryServerNameFromSettings(content string) string {
-	for _, line := range strings.Split(content, "\n") {
-		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
-		if found && strings.EqualFold(strings.TrimSpace(key), "ServerName") {
-			return strings.Trim(strings.TrimSpace(value), "\"'")
+func satisfactorySessionNameFromAutosaves(entries []satisfactoryWorkerEntry) (string, bool) {
+	var sessionName string
+	for _, entry := range entries {
+		if entry.Type != "file" {
+			continue
 		}
+		matches := satisfactoryAutosaveNamePattern.FindStringSubmatch(entry.Name)
+		if len(matches) != 2 {
+			continue
+		}
+		candidate := strings.TrimSpace(matches[1])
+		if !safeSatisfactoryDirectoryName(candidate) {
+			continue
+		}
+		if sessionName != "" && sessionName != candidate {
+			return "", false
+		}
+		sessionName = candidate
 	}
-	return ""
+	return sessionName, sessionName != ""
+}
+
+func satisfactorySingleBlueprintSessionDirectory(entries []satisfactoryWorkerEntry) (string, bool) {
+	var sessionName string
+	for _, entry := range entries {
+		candidate := strings.TrimSpace(entry.Name)
+		if entry.Type != "dir" || !safeSatisfactoryDirectoryName(candidate) {
+			continue
+		}
+		if sessionName != "" && sessionName != candidate {
+			return "", false
+		}
+		sessionName = candidate
+	}
+	return sessionName, sessionName != ""
 }
 
 func safeSatisfactoryDirectoryName(name string) bool {

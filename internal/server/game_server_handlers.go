@@ -987,6 +987,11 @@ func buildGameServerResponse(
 		}
 	}
 
+	configFiles := metadata.ConfigFiles
+	if isSatisfactoryBlueprintServer(srv.TemplateID) {
+		configFiles = withoutObsoleteSatisfactoryServerSettings(configFiles)
+	}
+
 	return gameServerResponse{
 		ID:                   srv.ID,
 		NodeID:               srv.NodeID,
@@ -1005,7 +1010,7 @@ func buildGameServerResponse(
 		ParentServerID:       strings.TrimSpace(metadata.ParentServerID),
 		ConnectHost:          strings.TrimSpace(metadata.ConnectHost),
 		ConnectPort:          connectPort,
-		ConfigFiles:          configFilesToResponse(metadata.ConfigFiles),
+		ConfigFiles:          configFilesToResponse(configFiles),
 		Status:               state,
 		StatusOutput:         statusOutput,
 		StatusError:          statusErr,

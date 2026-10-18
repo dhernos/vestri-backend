@@ -147,15 +147,51 @@ func TestSatisfactoryBlueprintFilenameUsesRedirectHeader(t *testing.T) {
 	}
 }
 
-func TestSatisfactoryServerNameFromSettings(t *testing.T) {
+func TestSatisfactorySessionNameFromAutosaves(t *testing.T) {
 	t.Parallel()
 
-	got := satisfactoryServerNameFromSettings("[/Script/FactoryGame.FGServerSettings]\nServerName=FICSIT Central\n")
-	if got != "FICSIT Central" {
-		t.Fatalf("configured server name = %q", got)
+	name, ok := satisfactorySessionNameFromAutosaves([]satisfactoryWorkerEntry{
+		{Name: "FICSIT Central_autosave_0.sav", Type: "file"},
+		{Name: "FICSIT Central_autosave_1.sav", Type: "file"},
+		{Name: "manual-save.sav", Type: "file"},
+	})
+	if !ok || name != "FICSIT Central" {
+		t.Fatalf("autosave session = (%q, %v), want (FICSIT Central, true)", name, ok)
 	}
-	if !safeSatisfactoryDirectoryName(got) || safeSatisfactoryDirectoryName("../escape") {
-		t.Fatal("server-name path validation failed")
+	if _, ok := satisfactorySessionNameFromAutosaves([]satisfactoryWorkerEntry{
+		{Name: "first_autosave_0.sav", Type: "file"},
+		{Name: "second_autosave_0.sav", Type: "file"},
+	}); ok {
+		t.Fatal("multiple autosave sessions must not select an arbitrary destination")
+	}
+}
+
+func TestSatisfactorySingleBlueprintSessionDirectory(t *testing.T) {
+	t.Parallel()
+
+	name, ok := satisfactorySingleBlueprintSessionDirectory([]satisfactoryWorkerEntry{
+		{Name: "FICSIT Central", Type: "dir"},
+		{Name: "ignore.sbp", Type: "file"},
+	})
+	if !ok || name != "FICSIT Central" {
+		t.Fatalf("blueprint session = (%q, %v), want (FICSIT Central, true)", name, ok)
+	}
+	if _, ok := satisfactorySingleBlueprintSessionDirectory([]satisfactoryWorkerEntry{
+		{Name: "first", Type: "dir"},
+		{Name: "second", Type: "dir"},
+	}); ok {
+		t.Fatal("multiple blueprint sessions must not select an arbitrary destination")
+	}
+}
+
+func TestSatisfactoryPathsMatchCurrentContainerLayout(t *testing.T) {
+	t.Parallel()
+
+	if satisfactoryServerSavePath != "data/saved/server" {
+		t.Fatalf("save path = %q", satisfactoryServerSavePath)
+	}
+	if satisfactoryBlueprintTargetPath != "data/saved/blueprints" {
+		t.Fatalf("blueprint path = %q", satisfactoryBlueprintTargetPath)
 	}
 }
 
