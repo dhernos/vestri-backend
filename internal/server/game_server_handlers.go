@@ -417,7 +417,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		_ = s.workerDeletePath(cleanupCtx, baseURL, apiKey, rootPath, true)
 	}()
 	if strings.EqualFold(strings.TrimSpace(template.Game), "satisfactory") {
-		if err := s.ensureSatisfactoryBlueprintDirectory(r.Context(), baseURL, apiKey); err != nil {
+		if err := s.ensureSatisfactoryBlueprintDirectory(r.Context(), baseURL, apiKey, node.ID); err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to prepare shared Satisfactory blueprint folder")
 			return
 		}

@@ -6,6 +6,10 @@ func canManageNodeInvites(nodeRole string) bool {
 	return nodeRole == auth.NodeAccessOwner
 }
 
+func canManageNodeBlueprints(nodeRole string) bool {
+	return nodeRole == auth.NodeAccessOwner || nodeRole == auth.NodeAccessAdmin
+}
+
 func canUseNodeWorkerProxy(role string) bool {
 	return role == auth.NodeAccessOwner
 }

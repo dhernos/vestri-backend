@@ -14,14 +14,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"yourapp/internal/auth"
 )
 
 const (
-	satisfactoryBlueprintLibraryPath = "satisfactory-blueprints"
-	satisfactoryBlueprintTargetPath  = "data/Blueprints"
+	satisfactoryBlueprintTargetPath  = "data/saved/SaveGames/blueprints"
 	maxSatisfactoryBlueprintBytes    = 64 << 20
 )
+
+func satisfactoryBlueprintLibraryPath(nodeID string) string {
+	return path.Join("satisfactory-blueprints", nodeID)
+}
 
 var (
 	satisfactoryBlueprintPageClient = &http.Client{
@@ -35,6 +39,7 @@ var (
 	}
 	satisfactoryBlueprintIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	satisfactoryCalculatorIDPattern = regexp.MustCompile(`^/en/blueprints/index/details/id/([0-9]+)(?:/|$)`)
+	satisfactoryCalculatorDirectDownloadPattern = regexp.MustCompile(`^/en/blueprints/index/download/id/([0-9]+)(?:/|$)`)
 	satisfactoryCalculatorDownloadPattern = regexp.MustCompile(`href=["'](?:https://satisfactory-calculator\.com)?(/en/blueprints/index/download/id/([0-9]+)(?:/[^"']*)?)["']`)
 )
 
@@ -43,13 +48,62 @@ type satisfactoryBlueprintFile struct {
 	Size int64  `json:"size"`
 }
 
+func (s *Server) loadSatisfactoryBlueprintNodeForRequest(w http.ResponseWriter, r *http.Request) (*auth.WorkerNode, bool) {
+	sess := sessionFromContext(r.Context())
+	if sess == nil {
+		writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return nil, false
+	}
+	nodeRef := strings.TrimSpace(chi.URLParam(r, "nodeRef"))
+	if nodeRef == "" {
+		writeError(w, http.StatusBadRequest, "nodeRef is required")
+		return nil, false
+	}
+	node, err := s.Users.FindAccessibleWorkerNodeByRef(r.Context(), sess.UserID, nodeRef)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to load node")
+		return nil, false
+	}
+	if node == nil {
+		writeError(w, http.StatusNotFound, "Node not found")
+		return nil, false
+	}
+	if !canManageNodeBlueprints(node.AccessRole) {
+		writeError(w, http.StatusForbidden, "Node owner or admin permission is required to manage shared blueprints")
+		return nil, false
+	}
+	return node, true
+}
+
+func (s *Server) handleListSatisfactoryBlueprintLibrary(w http.ResponseWriter, r *http.Request) {
+	node, ok := s.loadSatisfactoryBlueprintNodeForRequest(w, r)
+	if !ok {
+		return
+	}
+	baseURL, apiKey, err := s.workerTargetFromNode(node)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
+		return
+	}
+	if err := s.ensureSatisfactoryBlueprintDirectory(r.Context(), baseURL, apiKey, node.ID); err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to prepare shared blueprint folder")
+		return
+	}
+	files, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, satisfactoryBlueprintLibraryPath(node.ID))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to list shared blueprints")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"blueprints": files})
+}
+
 func (s *Server) handleListSatisfactoryBlueprints(w http.ResponseWriter, r *http.Request) {
 	_, node, gameServer, role, ok := s.loadNodeAndGameServerForRequest(w, r)
 	if !ok {
 		return
 	}
-	if !canManageGameServerFiles(role) {
-		writeError(w, http.StatusForbidden, "Server permission denied for blueprint management")
+	if !canViewGameServer(role) {
+		writeError(w, http.StatusForbidden, "Server permission denied for blueprint listing")
 		return
 	}
 	if !isSatisfactoryBlueprintServer(gameServer.TemplateID) {
@@ -62,16 +116,17 @@ func (s *Server) handleListSatisfactoryBlueprints(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
-	if err := s.ensureSatisfactoryBlueprintDirectory(r.Context(), baseURL, apiKey); err != nil {
+	if err := s.ensureSatisfactoryBlueprintDirectory(r.Context(), baseURL, apiKey, node.ID); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to prepare shared blueprint folder")
 		return
 	}
-	available, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, satisfactoryBlueprintLibraryPath)
+	available, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, satisfactoryBlueprintLibraryPath(node.ID))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to list shared blueprints")
 		return
 	}
-	installed, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, path.Join(gameServer.RootPath, satisfactoryBlueprintTargetPath))
+	installedDir := satisfactoryBlueprintServerDirectory(gameServer)
+	installed, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, installedDir)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to list installed blueprints")
 		return
@@ -83,16 +138,8 @@ func (s *Server) handleListSatisfactoryBlueprints(w http.ResponseWriter, r *http
 }
 
 func (s *Server) handleDownloadSatisfactoryBlueprint(w http.ResponseWriter, r *http.Request) {
-	_, node, gameServer, role, ok := s.loadNodeAndGameServerForRequest(w, r)
+	node, ok := s.loadSatisfactoryBlueprintNodeForRequest(w, r)
 	if !ok {
-		return
-	}
-	if !canManageGameServerFiles(role) {
-		writeError(w, http.StatusForbidden, "Server permission denied for blueprint management")
-		return
-	}
-	if !isSatisfactoryBlueprintServer(gameServer.TemplateID) {
-		writeError(w, http.StatusBadRequest, "Blueprint management is only available for Satisfactory servers")
 		return
 	}
 	name, ok := safeSatisfactoryBlueprintName(r.URL.Query().Get("name"))
@@ -105,7 +152,7 @@ func (s *Server) handleDownloadSatisfactoryBlueprint(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
-	resp, err := s.callWorkerStream(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/download", "path="+url.QueryEscape(path.Join(satisfactoryBlueprintLibraryPath, name)), "", nil)
+	resp, err := s.callWorkerStream(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/download", "path="+url.QueryEscape(path.Join(satisfactoryBlueprintLibraryPath(node.ID), name)), "", nil)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker request failed")
 		return
@@ -121,16 +168,8 @@ func (s *Server) handleDownloadSatisfactoryBlueprint(w http.ResponseWriter, r *h
 }
 
 func (s *Server) handleUploadSatisfactoryBlueprint(w http.ResponseWriter, r *http.Request) {
-	_, node, gameServer, role, ok := s.loadNodeAndGameServerForRequest(w, r)
+	node, ok := s.loadSatisfactoryBlueprintNodeForRequest(w, r)
 	if !ok {
-		return
-	}
-	if !canManageGameServerFiles(role) {
-		writeError(w, http.StatusForbidden, "Server permission denied for blueprint management")
-		return
-	}
-	if !isSatisfactoryBlueprintServer(gameServer.TemplateID) {
-		writeError(w, http.StatusBadRequest, "Blueprint management is only available for Satisfactory servers")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxSatisfactoryBlueprintBytes+(1<<20))
@@ -198,16 +237,8 @@ func (s *Server) handleUploadSatisfactoryBlueprint(w http.ResponseWriter, r *htt
 }
 
 func (s *Server) handleImportSatisfactoryBlueprint(w http.ResponseWriter, r *http.Request) {
-	_, node, gameServer, role, ok := s.loadNodeAndGameServerForRequest(w, r)
+	node, ok := s.loadSatisfactoryBlueprintNodeForRequest(w, r)
 	if !ok {
-		return
-	}
-	if !canManageGameServerFiles(role) {
-		writeError(w, http.StatusForbidden, "Server permission denied for blueprint management")
-		return
-	}
-	if !isSatisfactoryBlueprintServer(gameServer.TemplateID) {
-		writeError(w, http.StatusBadRequest, "Blueprint management is only available for Satisfactory servers")
 		return
 	}
 	var req struct {
@@ -283,8 +314,7 @@ func (s *Server) handleInstallSatisfactoryBlueprint(w http.ResponseWriter, r *ht
 		return
 	}
 	var req struct {
-		Name    string `json:"name"`
-		Install bool   `json:"install"`
+		Name string `json:"name"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -300,28 +330,23 @@ func (s *Server) handleInstallSatisfactoryBlueprint(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
-	destination := path.Join(gameServer.RootPath, satisfactoryBlueprintTargetPath, name)
-	workerPath := "/fs/copy"
-	body := map[string]string{
-		"source": path.Join(satisfactoryBlueprintLibraryPath, name),
-		"dest":   destination,
-	}
-	if !req.Install {
-		workerPath = "/fs/delete"
-		body = nil
-		statusCode, bodyBytes, callErr := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, workerPath, map[string]interface{}{"path": destination})
-		if callErr != nil {
-			writeError(w, http.StatusBadGateway, "Worker request failed")
-			return
-		}
-		if statusCode < 200 || statusCode >= 300 {
-			http.Error(w, strings.TrimSpace(string(bodyBytes)), statusCode)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
+	installedDir := satisfactoryBlueprintServerDirectory(gameServer)
+	destination := path.Join(installedDir, name)
+	installed, err := s.listSatisfactoryBlueprintFiles(r.Context(), baseURL, apiKey, installedDir)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to inspect installed blueprints")
 		return
 	}
-	statusCode, bodyBytes, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, workerPath, body)
+	for _, file := range installed {
+		if file.Name == name {
+			writeJSON(w, http.StatusOK, map[string]string{"message": "Blueprint is already installed"})
+			return
+		}
+	}
+	statusCode, bodyBytes, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/copy", map[string]string{
+		"source": path.Join(satisfactoryBlueprintLibraryPath(node.ID), name),
+		"dest":   destination,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker request failed")
 		return
@@ -334,16 +359,8 @@ func (s *Server) handleInstallSatisfactoryBlueprint(w http.ResponseWriter, r *ht
 }
 
 func (s *Server) handleDeleteSatisfactoryBlueprint(w http.ResponseWriter, r *http.Request) {
-	_, node, gameServer, role, ok := s.loadNodeAndGameServerForRequest(w, r)
+	node, ok := s.loadSatisfactoryBlueprintNodeForRequest(w, r)
 	if !ok {
-		return
-	}
-	if !canManageGameServerFiles(role) {
-		writeError(w, http.StatusForbidden, "Server permission denied for blueprint management")
-		return
-	}
-	if !isSatisfactoryBlueprintServer(gameServer.TemplateID) {
-		writeError(w, http.StatusBadRequest, "Blueprint management is only available for Satisfactory servers")
 		return
 	}
 	var req struct {
@@ -363,7 +380,7 @@ func (s *Server) handleDeleteSatisfactoryBlueprint(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
-	statusCode, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/delete", map[string]interface{}{"path": path.Join(satisfactoryBlueprintLibraryPath, name)})
+	statusCode, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/delete", map[string]interface{}{"path": path.Join(satisfactoryBlueprintLibraryPath(node.ID), name)})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker request failed")
 		return
@@ -375,9 +392,9 @@ func (s *Server) handleDeleteSatisfactoryBlueprint(w http.ResponseWriter, r *htt
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) ensureSatisfactoryBlueprintDirectory(ctx context.Context, baseURL *url.URL, apiKey string) error {
+func (s *Server) ensureSatisfactoryBlueprintDirectory(ctx context.Context, baseURL *url.URL, apiKey, nodeID string) error {
 	statusCode, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodPost, "/fs/mkdir", map[string]interface{}{
-		"path":      satisfactoryBlueprintLibraryPath,
+		"path":      satisfactoryBlueprintLibraryPath(nodeID),
 		"recursive": true,
 	})
 	if err != nil {
@@ -394,7 +411,7 @@ func (s *Server) listSatisfactoryBlueprintFiles(ctx context.Context, baseURL *ur
 	if err != nil {
 		return nil, err
 	}
-	if statusCode == http.StatusNotFound && dir != satisfactoryBlueprintLibraryPath {
+	if statusCode == http.StatusNotFound && dir != "" {
 		return []satisfactoryBlueprintFile{}, nil
 	}
 	if statusCode < 200 || statusCode >= 300 {
@@ -426,7 +443,10 @@ func (s *Server) uploadSatisfactoryBlueprintToWorker(ctx context.Context, node *
 	pipeReader, pipeWriter := io.Pipe()
 	formWriter := multipart.NewWriter(pipeWriter)
 	writeErrCh := make(chan error, 1)
-	targetPath := path.Join(satisfactoryBlueprintLibraryPath, filename)
+	if err := s.ensureSatisfactoryBlueprintDirectory(ctx, baseURL, apiKey, node.ID); err != nil {
+		return err
+	}
+	targetPath := path.Join(satisfactoryBlueprintLibraryPath(node.ID), filename)
 	go func() {
 		writeErrCh <- streamUploadMultipartToWorker(formWriter, pipeWriter, upload, targetPath, filename)
 	}()
@@ -446,7 +466,7 @@ func (s *Server) uploadSatisfactoryBlueprintToWorker(ctx context.Context, node *
 
 func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string) (*url.URL, string, error) {
 	page, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || !isAllowedSatisfactoryBlueprintURL(page) || page.RawQuery != "" || page.Fragment != "" {
+	if err != nil || !isAllowedSatisfactoryBlueprintURL(page) || page.Fragment != "" {
 		return nil, "", fmt.Errorf("URL must be an HTTPS blueprint page from one of the approved sites")
 	}
 	host := strings.ToLower(page.Hostname())
@@ -454,22 +474,35 @@ func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string) (*url
 	var filename string
 	switch host {
 	case "satisfactoryblueprints.com":
-		if page.Port() != "" || !strings.HasPrefix(page.Path, "/blueprint/") {
-			return nil, "", fmt.Errorf("URL must identify a Satisfactory Blueprints detail page")
+		if page.Port() != "" {
+			return nil, "", fmt.Errorf("URL must use the standard HTTPS port")
 		}
-		id := strings.TrimPrefix(strings.TrimSuffix(page.Path, "/"), "/blueprint/")
-		if !satisfactoryBlueprintIDPattern.MatchString(id) {
-			return nil, "", fmt.Errorf("URL must identify a valid Satisfactory blueprint")
+		parts := strings.Split(strings.Trim(page.Path, "/"), "/")
+		if len(parts) == 2 && parts[0] == "blueprint" && satisfactoryBlueprintIDPattern.MatchString(parts[1]) {
+			download, _ = url.Parse("https://satisfactoryblueprints.com/blueprint/download/" + parts[1])
+			filename = "blueprint-" + strings.ToLower(parts[1]) + ".sbp"
+		} else if len(parts) == 3 && parts[0] == "blueprint" && (parts[1] == "download" || parts[1] == "config") && satisfactoryBlueprintIDPattern.MatchString(parts[2]) {
+			ext := ".sbp"
+			if parts[1] == "config" {
+				ext = ".sbpcfg"
+			}
+			download, _ = url.Parse("https://satisfactoryblueprints.com/blueprint/" + parts[1] + "/" + parts[2])
+			filename = "blueprint-" + strings.ToLower(parts[2]) + ext
+		} else {
+			return nil, "", fmt.Errorf("URL must identify a Satisfactory Blueprints detail or download page")
 		}
-		download, _ = url.Parse("https://satisfactoryblueprints.com/blueprint/download/" + id)
-		filename = "blueprint-" + strings.ToLower(id) + ".sbp"
 	case "satisfactory-calculator.com":
 		if page.Port() != "" {
 			return nil, "", fmt.Errorf("URL must use the standard HTTPS port")
 		}
+		if matches := satisfactoryCalculatorDirectDownloadPattern.FindStringSubmatch(page.Path); len(matches) == 2 {
+			download = page
+			filename = "blueprint-" + matches[1] + ".sbp"
+			break
+		}
 		matches := satisfactoryCalculatorIDPattern.FindStringSubmatch(page.Path)
 		if len(matches) != 2 {
-			return nil, "", fmt.Errorf("URL must identify a Satisfactory Calculator blueprint detail page")
+			return nil, "", fmt.Errorf("URL must identify a Satisfactory Calculator blueprint detail or download page")
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, page.String(), nil)
 		if err != nil {
@@ -498,11 +531,20 @@ func satisfactoryBlueprintDownloadForPage(ctx context.Context, raw string) (*url
 			return nil, "", fmt.Errorf("blueprint download URL is not approved")
 		}
 		filename = "blueprint-" + matches[1] + ".sbp"
+	case "static.satisfactory-calculator.com":
+		if page.Port() != "" || !strings.HasPrefix(page.Path, "/data/blueprintsData/") || strings.ToLower(path.Ext(page.Path)) != ".sbp" {
+			return nil, "", fmt.Errorf("URL must identify a Satisfactory Calculator blueprint file")
+		}
+		download = page
+		filename = path.Base(page.Path)
 	default:
 		return nil, "", fmt.Errorf("blueprint source host is not approved")
 	}
 	if !isAllowedSatisfactoryBlueprintURL(download) {
 		return nil, "", fmt.Errorf("blueprint download URL is not approved")
+	}
+	if _, ok := safeSatisfactoryBlueprintName(filename); !ok {
+		return nil, "", fmt.Errorf("blueprint download filename is invalid")
 	}
 	return download, filename, nil
 }
@@ -533,4 +575,8 @@ func safeSatisfactoryBlueprintName(value string) (string, bool) {
 
 func isSatisfactoryBlueprintServer(templateID string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(templateID)), "satisfactory-")
+}
+
+func satisfactoryBlueprintServerDirectory(gameServer *auth.GameServer) string {
+	return path.Join(gameServer.RootPath, satisfactoryBlueprintTargetPath, gameServer.Slug)
 }
