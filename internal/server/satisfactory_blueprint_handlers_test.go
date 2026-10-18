@@ -159,6 +159,22 @@ func TestSatisfactoryServerNameFromSettings(t *testing.T) {
 	}
 }
 
+func TestSatisfactorySessionSaveExists(t *testing.T) {
+	t.Parallel()
+
+	if satisfactorySessionSaveExists([]satisfactoryWorkerEntry{
+		{Name: "new session", Type: "dir"},
+		{Name: "readme.txt", Type: "file"},
+	}) {
+		t.Fatal("session should not be ready without a save file")
+	}
+	if !satisfactorySessionSaveExists([]satisfactoryWorkerEntry{
+		{Name: "factory_autosave_0.sav", Type: "file"},
+	}) {
+		t.Fatal("session should be ready when a save file exists")
+	}
+}
+
 func TestSafeSatisfactoryBlueprintName(t *testing.T) {
 	t.Parallel()
 

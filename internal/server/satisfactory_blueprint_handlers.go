@@ -23,6 +23,7 @@ import (
 
 const (
 	satisfactoryBlueprintTargetPath  = "data/saved/blueprints"
+	satisfactoryServerSavePath       = "data/saved/SaveGames/server"
 	maxSatisfactoryBlueprintBytes    = 64 << 20
 )
 
@@ -40,6 +41,11 @@ var (
 type satisfactoryBlueprintFile struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
+}
+
+type satisfactoryWorkerEntry struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 func newSatisfactoryBlueprintHTTPClient() *http.Client {
@@ -143,9 +149,15 @@ func (s *Server) handleListSatisfactoryBlueprints(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadGateway, "Failed to list installed blueprints")
 		return
 	}
+	serverReady, err := s.satisfactoryServerHasCreatedSession(r.Context(), baseURL, apiKey, gameServer)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to check whether a Satisfactory game session has been created")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"available": available,
 		"installed": installed,
+		"serverReady": serverReady,
 	})
 }
 
@@ -352,6 +364,15 @@ func (s *Server) handleInstallSatisfactoryBlueprint(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
+	serverReady, err := s.satisfactoryServerHasCreatedSession(r.Context(), baseURL, apiKey, gameServer)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to check whether a Satisfactory game session has been created")
+		return
+	}
+	if !serverReady {
+		writeError(w, http.StatusConflict, "Create or load a Satisfactory game session in-game before installing blueprints")
+		return
+	}
 	installedDir, err := s.satisfactoryBlueprintServerDirectory(r.Context(), baseURL, apiKey, gameServer)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to resolve the Satisfactory server name")
@@ -459,6 +480,34 @@ func (s *Server) listSatisfactoryBlueprintFiles(ctx context.Context, baseURL *ur
 		}
 	}
 	return files, nil
+}
+
+func (s *Server) satisfactoryServerHasCreatedSession(ctx context.Context, baseURL *url.URL, apiKey string, gameServer *auth.GameServer) (bool, error) {
+	saveDir := path.Join(gameServer.RootPath, satisfactoryServerSavePath)
+	statusCode, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(saveDir), nil)
+	if err != nil {
+		return false, err
+	}
+	if statusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return false, fmt.Errorf("worker /fs/list failed (%d): %s", statusCode, strings.TrimSpace(string(body)))
+	}
+	var entries []satisfactoryWorkerEntry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return false, err
+	}
+	return satisfactorySessionSaveExists(entries), nil
+}
+
+func satisfactorySessionSaveExists(entries []satisfactoryWorkerEntry) bool {
+	for _, entry := range entries {
+		if entry.Type == "file" && strings.EqualFold(path.Ext(entry.Name), ".sav") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) satisfactoryBlueprintServerDirectory(ctx context.Context, baseURL *url.URL, apiKey string, gameServer *auth.GameServer) (string, error) {
