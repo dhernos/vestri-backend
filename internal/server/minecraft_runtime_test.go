@@ -35,53 +35,6 @@ func TestResolveMinecraftComposeTemplateUsesVanillaForVelocity(t *testing.T) {
 	}
 }
 
-func TestNormalizeCurseForgeModpackURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		input   string
-		want    string
-		wantErr bool
-	}{
-		{
-			name:  "download link becomes pinned file URL",
-			input: "https://www.curseforge.com/minecraft/modpacks/all-the-mods-10/download/9190182",
-			want:  "https://www.curseforge.com/minecraft/modpacks/all-the-mods-10/files/9190182",
-		},
-		{
-			name:  "file link stays pinned",
-			input: "https://www.curseforge.com/minecraft/modpacks/all-the-mods-10/files/9190182",
-			want:  "https://www.curseforge.com/minecraft/modpacks/all-the-mods-10/files/9190182",
-		},
-		{name: "wrong host", input: "https://evil.example/minecraft/modpacks/pack/files/123", wantErr: true},
-		{name: "non-https", input: "http://www.curseforge.com/minecraft/modpacks/pack/files/123", wantErr: true},
-		{name: "project page latest", input: "https://www.curseforge.com/minecraft/modpacks/pack/", want: "https://www.curseforge.com/minecraft/modpacks/pack"},
-		{name: "query string", input: "https://www.curseforge.com/minecraft/modpacks/pack/files/123?next=evil", wantErr: true},
-		{name: "user info", input: "https://evil@www.curseforge.com/minecraft/modpacks/pack/files/123", wantErr: true},
-	}
-
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := normalizeCurseForgeModpackURL(test.input)
-			if test.wantErr {
-				if err == nil {
-					t.Fatal("expected URL validation error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected URL validation error: %v", err)
-			}
-			if got != test.want {
-				t.Fatalf("normalized URL=%q, want %q", got, test.want)
-			}
-		})
-	}
-}
-
 func TestMinecraftServerJarFileNameForArtifactPreservesArtifactName(t *testing.T) {
 	artifact := &minecraftServerArtifact{FileName: "velocity-3.4.0.jar"}
 	name, err := minecraftServerJarFileNameForArtifact(artifact)
@@ -162,6 +115,61 @@ func TestNormalizeMinecraftSoftwareSupportsExtendedSoftware(t *testing.T) {
 		if got != expected {
 			t.Fatalf("expected %q for %q, got %q", expected, input, got)
 		}
+	}
+}
+
+func TestFlattenPaperMCProjectVersionsSortsAndExcludesSnapshots(t *testing.T) {
+	got := flattenPaperMCProjectVersions(map[string][]string{
+		"3.0.0": {"3.0.1-SNAPSHOT", "3.0.0", "3.0.1"},
+		"2.0.0": {"2.0.0"},
+	})
+	want := []string{"3.0.1", "3.0.0", "2.0.0"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected versions %v, got %v", want, got)
+	}
+}
+
+func TestSelectPaperMCBuildPrefersNewestStableBuild(t *testing.T) {
+	builds := []paperMCBuild{
+		{ID: 19, Channel: "BETA", Downloads: map[string]paperMCBuildDownload{
+			"server:default": {Name: "velocity-beta.jar", URL: "https://example.test/beta.jar"},
+		}},
+		{ID: 11, Channel: "STABLE", Downloads: map[string]paperMCBuildDownload{
+			"server:default": {Name: "velocity-stable-old.jar", URL: "https://example.test/old.jar"},
+		}},
+		{ID: 12, Channel: "STABLE", Downloads: map[string]paperMCBuildDownload{
+			"server:default": {Name: "velocity-stable.jar", URL: "https://example.test/stable.jar"},
+		}},
+		{ID: 99, Channel: "STABLE", Downloads: map[string]paperMCBuildDownload{
+			"server:default": {Name: "", URL: "https://example.test/missing-name.jar"},
+		}},
+	}
+
+	build, downloadURL, ok := selectPaperMCBuild(builds)
+	if !ok {
+		t.Fatal("expected a downloadable build")
+	}
+	if build.ID != 12 || downloadURL != "https://example.test/stable.jar" {
+		t.Fatalf("expected stable build 12 and its download URL, got build %d and %q", build.ID, downloadURL)
+	}
+}
+
+func TestSelectPaperMCBuildUsesNewestBuildWhenNoStableBuildExists(t *testing.T) {
+	builds := []paperMCBuild{
+		{ID: 19, Channel: "BETA", Downloads: map[string]paperMCBuildDownload{
+			"server:default": {Name: "velocity-beta.jar", URL: "https://example.test/beta.jar"},
+		}},
+		{ID: 21, Channel: "ALPHA", Downloads: map[string]paperMCBuildDownload{
+			"server:default": {Name: "velocity-alpha.jar", URL: "https://example.test/alpha.jar"},
+		}},
+	}
+
+	build, downloadURL, ok := selectPaperMCBuild(builds)
+	if !ok {
+		t.Fatal("expected a downloadable build")
+	}
+	if build.ID != 21 || downloadURL != "https://example.test/alpha.jar" {
+		t.Fatalf("expected newest build 21 and its download URL, got build %d and %q", build.ID, downloadURL)
 	}
 }
 

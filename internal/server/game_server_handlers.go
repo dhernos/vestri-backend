@@ -1178,8 +1178,8 @@ func buildVelocityBackendCompose(ctx context.Context, template *gameServerTempla
 		return "", err
 	}
 
-	out := stripComposeServicePorts(baseCompose, "minecraft")
-	out = ensureComposeServiceNetwork(out, "minecraft", "velocity")
+	out := stripComposeAllServicePorts(baseCompose)
+	out = ensureComposeAllServicesNetwork(out, "velocity")
 	out = ensureComposeExternalNetwork(out, "velocity", strings.TrimSpace(values["VELOCITY_NETWORK"]))
 	return ensureTextEndsWithNewline(out), nil
 }
@@ -1251,6 +1251,41 @@ func stripComposeServicePorts(content, serviceName string) string {
 		break
 	}
 	return strings.Join(lines, "\n")
+}
+
+func stripComposeAllServicePorts(content string) string {
+	serviceNames := composeServiceNames(content)
+	for i := len(serviceNames) - 1; i >= 0; i-- {
+		content = stripComposeServicePorts(content, serviceNames[i])
+	}
+	return content
+}
+
+func composeServiceNames(content string) []string {
+	lines := splitPreserveTrailingNewline(content)
+	servicesStart, servicesEnd, found := findComposeServicesBounds(lines)
+	if !found {
+		return nil
+	}
+
+	serviceNames := make([]string, 0)
+	for i := servicesStart + 1; i < servicesEnd; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || leadingWhitespaceWidth(lines[i]) != 2 {
+			continue
+		}
+		if strings.HasSuffix(trimmed, ":") {
+			serviceNames = append(serviceNames, strings.TrimSuffix(trimmed, ":"))
+		}
+	}
+	return serviceNames
+}
+
+func ensureComposeAllServicesNetwork(content, networkName string) string {
+	for _, serviceName := range composeServiceNames(content) {
+		content = ensureComposeServiceNetwork(content, serviceName, networkName)
+	}
+	return content
 }
 
 func ensureComposeServiceNetwork(content, serviceName, networkName string) string {
@@ -1582,29 +1617,8 @@ func findComposeServiceBounds(lines []string, serviceName string) (int, int, boo
 		return 0, 0, false
 	}
 
-	servicesStart := -1
-	servicesEnd := len(lines)
-	for i := range lines {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if leadingWhitespaceWidth(lines[i]) == 0 && trimmed == "services:" {
-			servicesStart = i
-			for j := i + 1; j < len(lines); j++ {
-				nextTrimmed := strings.TrimSpace(lines[j])
-				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
-					continue
-				}
-				if leadingWhitespaceWidth(lines[j]) == 0 {
-					servicesEnd = j
-					break
-				}
-			}
-			break
-		}
-	}
-	if servicesStart < 0 {
+	servicesStart, servicesEnd, found := findComposeServicesBounds(lines)
+	if !found {
 		return 0, 0, false
 	}
 
@@ -1632,6 +1646,32 @@ func findComposeServiceBounds(lines []string, serviceName string) (int, int, boo
 		return 0, 0, false
 	}
 	return serviceStart, serviceEnd, true
+}
+
+func findComposeServicesBounds(lines []string) (int, int, bool) {
+	servicesStart := -1
+	servicesEnd := len(lines)
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) == 0 && trimmed == "services:" {
+			servicesStart = i
+			for j := i + 1; j < len(lines); j++ {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+					continue
+				}
+				if leadingWhitespaceWidth(lines[j]) == 0 {
+					servicesEnd = j
+					break
+				}
+			}
+			break
+		}
+	}
+	return servicesStart, servicesEnd, servicesStart >= 0
 }
 
 func (s *Server) velocityServerHasBackends(ctx context.Context, nodeID, parentServerID string) (bool, error) {

@@ -38,24 +38,53 @@ func TestBuildVelocityStandaloneComposeUsesManagedNetwork(t *testing.T) {
 }
 
 func TestBuildVelocityBackendComposeUsesExternalNetwork(t *testing.T) {
-	template := &gameServerTemplate{
-		ID:              vanillaTemplateID,
-		Game:            "minecraft",
-		TemplateVersion: "1",
-		ComposeInline:   "services:\n  minecraft:\n    image: test\n",
+	type templateCase struct {
+		name     string
+		template *gameServerTemplate
 	}
-
-	out, err := buildVelocityBackendCompose(context.Background(), template, map[string]string{
-		"VELOCITY_NETWORK": "vestri-velocity-test",
+	templates := make([]templateCase, 0, 3)
+	for _, templateID := range []string{vanillaTemplateID, curseForgeTemplateID} {
+		template, err := gameServerTemplateByID(templateID)
+		if err != nil {
+			t.Fatalf("failed to load %s template: %v", templateID, err)
+		}
+		if template == nil {
+			t.Fatalf("expected %s template to exist", templateID)
+		}
+		templates = append(templates, templateCase{name: templateID, template: template})
+	}
+	templates = append(templates, templateCase{
+		name: "alternate service name",
+		template: &gameServerTemplate{
+			ID:              curseForgeTemplateID,
+			Game:            "minecraft",
+			TemplateVersion: "1",
+			ComposeInline:   "services:\n  modpack:\n    image: test\n    ports:\n      - \"25565:25565\"\n",
+		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(out, "external: true") {
-		t.Fatalf("backend compose must declare external network:\n%s", out)
-	}
-	if !strings.Contains(out, `name: "vestri-velocity-test"`) {
-		t.Fatalf("expected external velocity network name, got:\n%s", out)
+
+	for _, testCase := range templates {
+		t.Run(testCase.name, func(t *testing.T) {
+			out, err := buildVelocityBackendCompose(context.Background(), testCase.template, map[string]string{
+				"VELOCITY_NETWORK": "vestri-velocity-test",
+				"CURSEFORGE_URL":   "https://www.curseforge.com/minecraft/modpacks/test",
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if strings.Contains(out, "ports:") || strings.Contains(out, "25565:25565") {
+				t.Fatalf("velocity backend must not publish ports:\n%s", out)
+			}
+			if !strings.Contains(out, "networks:\n      - velocity") {
+				t.Fatalf("backend services must join the velocity network:\n%s", out)
+			}
+			if !strings.Contains(out, "external: true") {
+				t.Fatalf("backend compose must declare external network:\n%s", out)
+			}
+			if !strings.Contains(out, `name: "vestri-velocity-test"`) {
+				t.Fatalf("expected external velocity network name, got:\n%s", out)
+			}
+		})
 	}
 }
 

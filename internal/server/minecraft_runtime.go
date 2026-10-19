@@ -62,7 +62,6 @@ const (
 var (
 	stableMinecraftVersionPattern = regexp.MustCompile(`^\d+\.\d+(\.\d+)?$`)
 	looseVersionTokenPattern      = regexp.MustCompile(`[0-9]+|[A-Za-z]+`)
-	curseForgeModpackURLPattern   = regexp.MustCompile(`^/minecraft/modpacks/([a-z0-9-]+)(?:/(download|files)/([0-9]+))?/?$`)
 	externalAPIFetchClient        = &http.Client{Timeout: 30 * time.Second}
 	minecraftVersionCache         = softwareVersionListCache{
 		entries: make(map[string]softwareVersionListCacheEntry),
@@ -187,26 +186,7 @@ func shouldProvisionMinecraftServerArtifact(template *gameServerTemplate) bool {
 	if template == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(template.Game), "minecraft") && template.ID != curseForgeTemplateID
-}
-
-func normalizeCurseForgeModpackURL(value string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || !strings.EqualFold(parsed.Scheme, "https") ||
-		!strings.EqualFold(parsed.Host, "www.curseforge.com") || parsed.User != nil ||
-		parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", fmt.Errorf("invalid CurseForge modpack URL")
-	}
-
-	matches := curseForgeModpackURLPattern.FindStringSubmatch(parsed.Path)
-	if len(matches) != 4 {
-		return "", fmt.Errorf("URL must identify a CurseForge Minecraft modpack")
-	}
-	// Without a file ID the project page is passed through and the installer resolves the latest file.
-	if matches[3] == "" {
-		return "https://www.curseforge.com/minecraft/modpacks/" + matches[1], nil
-	}
-	return "https://www.curseforge.com/minecraft/modpacks/" + matches[1] + "/files/" + matches[3], nil
+	return strings.EqualFold(strings.TrimSpace(template.Game), "minecraft")
 }
 
 func normalizeMinecraftSoftware(value string) string {
@@ -418,25 +398,24 @@ func fetchMojangVersionManifest(ctx context.Context) (*mojangVersionManifest, er
 	return &payload, nil
 }
 
-// Fill v3 groups versions by major line: {"1.21": ["1.21.8", ...]}.
-type paperProjectVersionsResponse struct {
+type paperMCProjectVersionsResponse struct {
 	Versions map[string][]string `json:"versions"`
 }
 
-func (p paperProjectVersionsResponse) flatten() []string {
-	var out []string
-	for _, group := range p.Versions {
-		out = append(out, group...)
-	}
-	return out
-}
-
 func fetchPaperReleaseVersions(ctx context.Context) ([]string, error) {
-	var payload paperProjectVersionsResponse
+	var payload paperMCProjectVersionsResponse
 	if err := fetchExternalJSON(ctx, paperVersionsURL, &payload); err != nil {
 		return nil, err
 	}
-	return normalizeMinecraftVersionList(payload.flatten()), nil
+	return flattenPaperMCProjectVersions(payload.Versions), nil
+}
+
+func flattenPaperMCProjectVersions(groups map[string][]string) []string {
+	versions := make([]string, 0)
+	for _, group := range groups {
+		versions = append(versions, group...)
+	}
+	return normalizeMinecraftVersionList(versions)
 }
 
 type purpurProjectVersionsResponse struct {
@@ -480,11 +459,11 @@ func fetchFabricReleaseVersions(ctx context.Context) ([]string, error) {
 }
 
 func fetchVelocityReleaseVersions(ctx context.Context) ([]string, error) {
-	var payload paperProjectVersionsResponse
+	var payload paperMCProjectVersionsResponse
 	if err := fetchExternalJSON(ctx, velocityVersionsURL, &payload); err != nil {
 		return nil, err
 	}
-	return normalizeMinecraftVersionList(payload.flatten()), nil
+	return flattenPaperMCProjectVersions(payload.Versions), nil
 }
 
 type mavenMetadata struct {
@@ -726,7 +705,7 @@ func fetchExternalJSON(ctx context.Context, endpoint string, dst interface{}) er
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "vestri-backend/1")
+	req.Header.Set("User-Agent", "vestri-backend/1 (https://github.com/dhernos/vestri-backend)")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := externalAPIFetchClient.Do(req)
@@ -862,73 +841,81 @@ func resolveVanillaServerArtifact(ctx context.Context, requestedVersion string) 
 	}, nil
 }
 
-type fillBuild struct {
-	ID        int    `json:"id"`
-	Channel   string `json:"channel"`
-	Downloads map[string]struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	} `json:"downloads"`
+type paperMCBuild struct {
+	ID        int                             `json:"id"`
+	Channel   string                          `json:"channel"`
+	Downloads map[string]paperMCBuildDownload `json:"downloads"`
 }
 
-// selectFillBuild prefers the newest STABLE build, falling back to the newest build with a server download.
-func selectFillBuild(builds []fillBuild) (downloadURL, name string, ok bool) {
-	bestID := -1
-	bestStable := false
+type paperMCBuildDownload struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+func selectPaperMCBuild(builds []paperMCBuild) (paperMCBuild, string, bool) {
+	selected := paperMCBuild{}
+	selectedDownloadURL := ""
+	selectedChannel := ""
 	for _, build := range builds {
-		download, exists := build.Downloads["server:default"]
-		if !exists || strings.TrimSpace(download.URL) == "" || strings.TrimSpace(download.Name) == "" {
+		download, ok := build.Downloads["server:default"]
+		if !ok || strings.TrimSpace(download.Name) == "" || strings.TrimSpace(download.URL) == "" {
 			continue
 		}
-		stable := strings.EqualFold(strings.TrimSpace(build.Channel), "STABLE")
-		if bestID != -1 && (bestStable && !stable || bestStable == stable && build.ID <= bestID) {
-			continue
+		channel := strings.ToUpper(strings.TrimSpace(build.Channel))
+		isStable := channel == "STABLE"
+		selectedIsStable := selectedChannel == "STABLE"
+		if selected.ID == 0 || (isStable && !selectedIsStable) ||
+			(isStable == selectedIsStable && build.ID > selected.ID) {
+			selected = build
+			selectedDownloadURL = strings.TrimSpace(download.URL)
+			selectedChannel = channel
 		}
-		bestID = build.ID
-		bestStable = stable
-		downloadURL = strings.TrimSpace(download.URL)
-		name = strings.TrimSpace(download.Name)
 	}
-	return downloadURL, name, bestID != -1
+	return selected, selectedDownloadURL, selected.ID != 0
 }
 
-func resolvePaperServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+func resolvePaperMCServerArtifact(ctx context.Context, project, software, requestedVersion string) (*minecraftServerArtifact, error) {
 	version := strings.TrimSpace(requestedVersion)
 	if version == "" || strings.EqualFold(version, "LATEST") {
-		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwarePaper)
+		versions, err := listMinecraftVersionsForSoftware(ctx, software)
 		if err != nil {
 			return nil, err
 		}
 		if len(versions) == 0 {
-			return nil, fmt.Errorf("no paper versions are available")
+			return nil, fmt.Errorf("no %s versions are available", strings.ToLower(software))
 		}
 		version = versions[0]
 	}
 	if !isStableMinecraftVersion(version) {
-		return nil, fmt.Errorf("paper version %q is invalid", version)
+		return nil, fmt.Errorf("%s version %q is invalid", strings.ToLower(software), version)
 	}
 
 	buildURL := fmt.Sprintf(
-		"%s/versions/%s/builds",
-		paperVersionsURL,
+		"https://fill.papermc.io/v3/projects/%s/versions/%s/builds",
+		url.PathEscape(project),
 		url.PathEscape(version),
 	)
 
-	var builds []fillBuild
-	if err := fetchExternalJSON(ctx, buildURL, &builds); err != nil {
+	var payload []paperMCBuild
+	if err := fetchExternalJSON(ctx, buildURL, &payload); err != nil {
 		return nil, err
 	}
-	downloadURL, selectedName, ok := selectFillBuild(builds)
+	selectedBuild, downloadURL, ok := selectPaperMCBuild(payload)
 	if !ok {
-		return nil, fmt.Errorf("paper version %s has no downloadable build", version)
+		return nil, fmt.Errorf("%s version %s has no downloadable build", strings.ToLower(software), version)
 	}
+	downloadName := selectedBuild.Downloads["server:default"].Name
 
 	return &minecraftServerArtifact{
-		Software:    minecraftSoftwarePaper,
+		Software:    software,
 		Version:     version,
 		DownloadURL: downloadURL,
-		FileName:    selectedName,
+		FileName:    downloadName,
 	}, nil
+}
+
+func resolvePaperServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
+	return resolvePaperMCServerArtifact(ctx, "paper", minecraftSoftwarePaper, requestedVersion)
 }
 
 func resolvePurpurServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
@@ -1298,42 +1285,7 @@ func selectPreferredSpongeJarAsset(assets []spongeVersionAsset, buildVersion str
 }
 
 func resolveVelocityServerArtifact(ctx context.Context, requestedVersion string) (*minecraftServerArtifact, error) {
-	version := strings.TrimSpace(requestedVersion)
-	if version == "" || strings.EqualFold(version, "LATEST") {
-		versions, err := listMinecraftVersionsForSoftware(ctx, minecraftSoftwareVelocity)
-		if err != nil {
-			return nil, err
-		}
-		if len(versions) == 0 {
-			return nil, fmt.Errorf("no velocity versions are available")
-		}
-		version = versions[0]
-	}
-	if !isStableMinecraftVersion(version) {
-		return nil, fmt.Errorf("velocity version %q is invalid", version)
-	}
-
-	buildURL := fmt.Sprintf(
-		"%s/versions/%s/builds",
-		velocityVersionsURL,
-		url.PathEscape(version),
-	)
-
-	var builds []fillBuild
-	if err := fetchExternalJSON(ctx, buildURL, &builds); err != nil {
-		return nil, err
-	}
-	downloadURL, selectedName, ok := selectFillBuild(builds)
-	if !ok {
-		return nil, fmt.Errorf("velocity version %s has no downloadable build", version)
-	}
-
-	return &minecraftServerArtifact{
-		Software:    minecraftSoftwareVelocity,
-		Version:     version,
-		DownloadURL: downloadURL,
-		FileName:    selectedName,
-	}, nil
+	return resolvePaperMCServerArtifact(ctx, "velocity", minecraftSoftwareVelocity, requestedVersion)
 }
 
 func fileNameFromURL(rawURL, fallback string) string {
