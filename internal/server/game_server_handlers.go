@@ -514,7 +514,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			renderValues["VELOCITY_FORWARDING_SECRET"] = forwardingSecret
 			metadata.Kind = gameServerKindVelocity
 			metadata.VelocityNetwork = velocityNetwork
-			metadata.ConnectPort = defaultVelocityPort
+			metadata.ConnectPort = defaultMinecraftPort
 		}
 
 		if isVelocityTemplate(template) {
@@ -982,7 +982,7 @@ func buildGameServerResponse(
 	if connectPort == 0 {
 		switch kind {
 		case gameServerKindVelocity:
-			connectPort = defaultVelocityPort
+			connectPort = defaultMinecraftPort
 		case gameServerKindVelocityBackend:
 			connectPort = defaultMinecraftPort
 		}
@@ -1190,7 +1190,7 @@ func buildVelocityStandaloneCompose(ctx context.Context, template *gameServerTem
 		return "", err
 	}
 
-	out := setComposeServiceSinglePort(baseCompose, "minecraft", "25577:25577")
+	out := setComposeServiceSinglePort(baseCompose, "minecraft", fmt.Sprintf("%d:%d", defaultMinecraftPort, defaultVelocityPort))
 	out = ensureComposeServiceBindVolume(out, "minecraft", "./data:/server")
 	out = ensureComposeServiceEnvironmentValue(out, "minecraft", "TYPE", "VELOCITY")
 	out = ensureComposeServiceNetwork(out, "minecraft", "velocity")
