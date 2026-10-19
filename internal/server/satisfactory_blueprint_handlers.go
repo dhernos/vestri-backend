@@ -17,8 +17,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/go-chi/chi/v5"
 	"yourapp/internal/auth"
+
+	"github.com/go-chi/chi/v5"
 )
 
 const (
@@ -59,6 +60,8 @@ func newSatisfactoryBlueprintHTTPClient() *http.Client {
 			if len(via) >= 4 || !isAllowedSatisfactoryBlueprintURL(req.URL) {
 				return http.ErrUseLastResponse
 			}
+			// The calculator redirects to URLs with raw spaces in the query, which Go would send unescaped.
+			req.URL.RawQuery = strings.ReplaceAll(req.URL.RawQuery, " ", "%20")
 			return nil
 		},
 	}
@@ -286,20 +289,121 @@ func (s *Server) handleImportSatisfactoryBlueprint(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, downloadURL.String(), nil)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid blueprint source")
+	referer := ""
+	if parsed, parseErr := url.Parse(strings.TrimSpace(req.URL)); parseErr == nil && isAllowedSatisfactoryBlueprintURL(parsed) {
+		referer = parsed.String()
+	}
+
+	sources := []satisfactoryBlueprintSource{{url: downloadURL, filename: filename}}
+	companionURL, companionName, hasCompanion := satisfactoryBlueprintCompanion(downloadURL, filename)
+	if hasCompanion {
+		sources = append(sources, satisfactoryBlueprintSource{url: companionURL, filename: companionName, optional: !isSatisfactoryBlueprintPageSource(req.URL)})
+	}
+	// Blueprint (.sbp) first, then its config (.sbpcfg).
+	if strings.EqualFold(path.Ext(filename), ".sbpcfg") && hasCompanion {
+		sources[0], sources[1] = sources[1], sources[0]
+	}
+
+	for _, source := range sources {
+		status, message := s.importSatisfactoryBlueprintFile(r.Context(), blueprintClient, node, source, referer)
+		if message == "" {
+			continue
+		}
+		// A bare CDN file link has no guaranteed companion, so that one is best-effort.
+		if source.optional {
+			continue
+		}
+		writeError(w, status, message)
 		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+type satisfactoryBlueprintSource struct {
+	url      *url.URL
+	filename string
+	optional bool
+}
+
+// isSatisfactoryBlueprintPageSource reports whether the input is a detail page rather than a direct file link.
+func isSatisfactoryBlueprintPageSource(raw string) bool {
+	page, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(page.Hostname()) {
+	case "static.satisfactory-calculator.com":
+		return false
+	}
+	return true
+}
+
+// satisfactoryBlueprintCompanion returns the config URL for a blueprint file, or the blueprint URL for a config file.
+func satisfactoryBlueprintCompanion(source *url.URL, filename string) (*url.URL, string, bool) {
+	companion := *source
+	isConfig := strings.EqualFold(path.Ext(filename), ".sbpcfg")
+	companionName := strings.TrimSuffix(filename, path.Ext(filename)) + ".sbpcfg"
+	if isConfig {
+		companionName = strings.TrimSuffix(filename, path.Ext(filename)) + ".sbp"
+	}
+
+	switch strings.ToLower(source.Hostname()) {
+	case "satisfactoryblueprints.com", "www.satisfactoryblueprints.com":
+		from, to := "/blueprint/download/", "/blueprint/config/"
+		if isConfig {
+			from, to = to, from
+		}
+		if !strings.HasPrefix(source.Path, from) {
+			return nil, "", false
+		}
+		companion.Path = to + strings.TrimPrefix(source.Path, from)
+		companion.RawPath = ""
+	case "satisfactory-calculator.com", "www.satisfactory-calculator.com":
+		from, to := "/index/download/id/", "/index/download-cfg/id/"
+		if isConfig {
+			from, to = to, from
+		}
+		if !strings.Contains(source.EscapedPath(), from) {
+			return nil, "", false
+		}
+		companion.RawPath = strings.Replace(source.EscapedPath(), from, to, 1)
+		companion.Path = strings.Replace(source.Path, from, to, 1)
+	case "static.satisfactory-calculator.com":
+		ext := ".sbpcfg"
+		if isConfig {
+			ext = ".sbp"
+		}
+		companion.Path = strings.TrimSuffix(source.Path, path.Ext(source.Path)) + ext
+		companion.RawPath = ""
+	default:
+		return nil, "", false
+	}
+	if !isAllowedSatisfactoryBlueprintURL(&companion) {
+		return nil, "", false
+	}
+	return &companion, companionName, true
+}
+
+// importSatisfactoryBlueprintFile downloads one file and stores it in the node library; a non-empty message means failure.
+func (s *Server) importSatisfactoryBlueprintFile(
+	ctx context.Context,
+	client *http.Client,
+	node *auth.WorkerNode,
+	source satisfactoryBlueprintSource,
+	referer string,
+) (int, string) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.url.String(), nil)
+	if err != nil {
+		return http.StatusBadRequest, "Invalid blueprint source"
 	}
 	request.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 	request.Header.Set("Accept", "application/octet-stream, */*")
-	if referer, parseErr := url.Parse(strings.TrimSpace(req.URL)); parseErr == nil && isAllowedSatisfactoryBlueprintURL(referer) {
-		request.Header.Set("Referer", referer.String())
+	if referer != "" {
+		request.Header.Set("Referer", referer)
 	}
-	response, err := blueprintClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to download blueprint from the approved source")
-		return
+		return http.StatusBadGateway, "Failed to download blueprint from the approved source"
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -307,18 +411,15 @@ func (s *Server) handleImportSatisfactoryBlueprint(w http.ResponseWriter, r *htt
 		if detail := readWorkerErrorText(response.Body); detail != "" {
 			message += ": " + detail
 		}
-		writeError(w, http.StatusBadGateway, message)
-		return
+		return http.StatusBadGateway, message
 	}
-	filename = satisfactoryBlueprintResponseFilename(response, filename)
+	filename := satisfactoryBlueprintResponseFilename(response, source.filename)
 	if response.ContentLength > maxSatisfactoryBlueprintBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "Blueprint exceeds the 64 MiB limit")
-		return
+		return http.StatusRequestEntityTooLarge, "Blueprint exceeds the 64 MiB limit"
 	}
 	temp, err := os.CreateTemp("", "vestri-blueprint-import-*")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to stage blueprint download")
-		return
+		return http.StatusInternalServerError, "Failed to stage blueprint download"
 	}
 	defer func() {
 		name := temp.Name()
@@ -328,18 +429,15 @@ func (s *Server) handleImportSatisfactoryBlueprint(w http.ResponseWriter, r *htt
 	limited := &io.LimitedReader{R: response.Body, N: maxSatisfactoryBlueprintBytes + 1}
 	written, err := io.Copy(temp, limited)
 	if err != nil || written > maxSatisfactoryBlueprintBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "Blueprint exceeds the 64 MiB limit")
-		return
+		return http.StatusRequestEntityTooLarge, "Blueprint exceeds the 64 MiB limit"
 	}
 	if _, err := temp.Seek(0, io.SeekStart); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to prepare blueprint download")
-		return
+		return http.StatusInternalServerError, "Failed to prepare blueprint download"
 	}
-	if err := s.uploadSatisfactoryBlueprintToWorker(r.Context(), node, temp, filename); err != nil {
-		writeError(w, http.StatusBadGateway, "Failed to save blueprint to worker")
-		return
+	if err := s.uploadSatisfactoryBlueprintToWorker(ctx, node, temp, filename); err != nil {
+		return http.StatusBadGateway, "Failed to save blueprint to worker"
 	}
-	w.WriteHeader(http.StatusCreated)
+	return 0, ""
 }
 
 func (s *Server) handleInstallSatisfactoryBlueprint(w http.ResponseWriter, r *http.Request) {

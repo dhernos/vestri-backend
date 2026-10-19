@@ -298,7 +298,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	if template.ID == curseForgeTemplateID {
 		curseForgeURL, err = normalizeCurseForgeModpackURL(req.CurseForgeURL)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "A valid CurseForge modpack file URL is required")
+			writeError(w, http.StatusBadRequest, "A valid CurseForge modpack URL is required")
 			return
 		}
 	} else if strings.TrimSpace(req.CurseForgeURL) != "" {

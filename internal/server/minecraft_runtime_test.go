@@ -56,7 +56,7 @@ func TestNormalizeCurseForgeModpackURL(t *testing.T) {
 		},
 		{name: "wrong host", input: "https://evil.example/minecraft/modpacks/pack/files/123", wantErr: true},
 		{name: "non-https", input: "http://www.curseforge.com/minecraft/modpacks/pack/files/123", wantErr: true},
-		{name: "project page without file", input: "https://www.curseforge.com/minecraft/modpacks/pack", wantErr: true},
+		{name: "project page latest", input: "https://www.curseforge.com/minecraft/modpacks/pack/", want: "https://www.curseforge.com/minecraft/modpacks/pack"},
 		{name: "query string", input: "https://www.curseforge.com/minecraft/modpacks/pack/files/123?next=evil", wantErr: true},
 		{name: "user info", input: "https://evil@www.curseforge.com/minecraft/modpacks/pack/files/123", wantErr: true},
 	}
