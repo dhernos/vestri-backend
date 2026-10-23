@@ -920,6 +920,14 @@ func (s *Server) loadNodeAndGameServerForRequest(w http.ResponseWriter, r *http.
 		return nil, nil, nil, "", false
 	}
 
+	if groupFilesScoped(r.Context()) {
+		if !isVelocityServer(&access.GameServer) {
+			writeError(w, http.StatusBadRequest, "Plugin staging is only available for velocity servers")
+			return nil, nil, nil, "", false
+		}
+		access.GameServer.RootPath = path.Join(access.GameServer.RootPath, velocityPluginStagingRelativePath)
+	}
+
 	return sess, node, &access.GameServer, access.AccessRole, true
 }
 
