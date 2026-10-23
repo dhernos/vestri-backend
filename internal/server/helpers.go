@@ -1,16 +1,22 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/mail"
 	"strings"
 	"unicode"
 )
+
+const maxJSONBodyBytes = 10 << 20
+
+var errJSONBodyTooLarge = errors.New("JSON request body exceeds the maximum size")
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -23,7 +29,15 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func decodeJSON(r *http.Request, dst interface{}) error {
-	dec := json.NewDecoder(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBodyBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > maxJSONBodyBytes {
+		return errJSONBodyTooLarge
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	return dec.Decode(dst)
 }
@@ -75,15 +89,28 @@ func clientIP(r *http.Request, trusted []net.IPNet) string {
 	}
 
 	// Only trust forwarded headers when the immediate sender is a trusted proxy.
-	if remoteHost != "" && isTrustedProxy(remoteHost, trusted) {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+	if remoteIP := net.ParseIP(remoteHost); remoteIP != nil && isTrustedIP(remoteIP, trusted) {
+		if xff := strings.TrimSpace(strings.Join(r.Header.Values("X-Forwarded-For"), ",")); xff != "" {
 			parts := strings.Split(xff, ",")
-			if ip := strings.TrimSpace(parts[0]); ip != "" {
-				return ip
+			current := remoteIP
+			for i := len(parts) - 1; i >= 0; i-- {
+				if !isTrustedIP(current, trusted) {
+					return current.String()
+				}
+				forwardedIP := net.ParseIP(strings.TrimSpace(parts[i]))
+				if forwardedIP == nil {
+					// A malformed chain must not let an untrusted header select the
+					// identity used for rate limiting or audit records.
+					return remoteHost
+				}
+				current = forwardedIP
 			}
+			return current.String()
 		}
 		if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
-			return strings.TrimSpace(xrip)
+			if ip := net.ParseIP(strings.TrimSpace(xrip)); ip != nil {
+				return ip.String()
+			}
 		}
 	}
 
@@ -143,11 +170,15 @@ func parseProxyCIDRs(values []string) []net.IPNet {
 }
 
 func isTrustedProxy(ipStr string, proxies []net.IPNet) bool {
-	if len(proxies) == 0 {
-		return false
-	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
+		return false
+	}
+	return isTrustedIP(ip, proxies)
+}
+
+func isTrustedIP(ip net.IP, proxies []net.IPNet) bool {
+	if len(proxies) == 0 || ip == nil {
 		return false
 	}
 	for _, n := range proxies {

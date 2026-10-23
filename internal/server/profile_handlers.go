@@ -150,7 +150,12 @@ func (s *Server) handleUpdateEmail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req updateEmailRequest
-	if err := decodeJSON(r, &req); err != nil || !validateEmail(req.NewEmail) {
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid email format")
+		return
+	}
+	req.NewEmail = canonicalizeEmail(req.NewEmail)
+	if !validateEmail(req.NewEmail) {
 		writeError(w, http.StatusBadRequest, "Invalid email format")
 		return
 	}

@@ -33,6 +33,7 @@ func NewUserRepository(db *pgxpool.Pool) *UserRepository {
 
 func (r *UserRepository) Create(ctx context.Context, name *string, email string, passwordHash *string, verified *time.Time) (*User, error) {
 	id := uuid.NewString()
+	email = strings.ToLower(strings.TrimSpace(email))
 
 	query := `
 		INSERT INTO "User"
@@ -49,14 +50,30 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*User, 
 	query := `
 		SELECT "id","name","email","emailVerified","password","image","theme","twoFactorSecret","isTwoFactorEnabled","twoFactorMethod","twoFactorEmailCode","twoFactorCodeExpires","passwordResetToken","passwordResetExpires","role","createdAt","updatedAt"
 		FROM "User"
-		WHERE "email"=$1
+		WHERE LOWER("email")=LOWER($1)
 	`
-	row := r.DB.QueryRow(ctx, query, email)
-	user, err := scanUser(row)
-	if errors.Is(err, pgx.ErrNoRows) {
+	rows, err := r.DB.Query(ctx, query, strings.TrimSpace(email))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
-	return user, err
+	user, err := scanUser(rows)
+	if err != nil {
+		return nil, err
+	}
+	if rows.Next() {
+		return nil, errors.New("multiple accounts use the same case-insensitive email address")
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 func (r *UserRepository) FindByID(ctx context.Context, id string) (*User, error) {
@@ -210,6 +227,7 @@ func (r *UserRepository) UpdateProfile(ctx context.Context, userID string, name 
 }
 
 func (r *UserRepository) UpdateEmail(ctx context.Context, userID, email string) (*User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
 	row := r.DB.QueryRow(ctx, `
 		UPDATE "User"
 		SET "email"=$1,

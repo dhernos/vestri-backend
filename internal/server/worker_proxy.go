@@ -27,6 +27,10 @@ var workerHTTPClient = &http.Client{
 	Transport: newWorkerTransport(),
 }
 
+const maxWorkerUploadBytes int64 = 1 << 30
+
+var errWorkerUploadTooLarge = errors.New("worker upload exceeds the maximum size")
+
 func newWorkerTransport() *http.Transport {
 	return &http.Transport{
 		Proxy:                 nil,
@@ -167,7 +171,6 @@ func (s *Server) handleWorkerProxy(w http.ResponseWriter, r *http.Request) {
 	bodyReader := r.Body
 	bodySize := r.ContentLength
 	var bodyCounter *countingReadCloser
-	var cleanup func()
 
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	nonce := strings.ReplaceAll(auth.NewSessionID(), "-", "")
@@ -176,21 +179,30 @@ func (s *Server) handleWorkerProxy(w http.ResponseWriter, r *http.Request) {
 	proxyCtx := r.Context()
 	var cancel context.CancelFunc
 	if isUpload {
-		tmp, size, err := bufferUploadBody(r.Body)
+		if r.ContentLength > maxWorkerUploadBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "Upload exceeds the maximum size")
+			return
+		}
+
+		tmp, size, err := bufferUploadBody(r.Body, maxWorkerUploadBytes)
 		if err != nil {
+			if errors.Is(err, errWorkerUploadTooLarge) {
+				writeError(w, http.StatusRequestEntityTooLarge, "Upload exceeds the maximum size")
+				return
+			}
 			log.Printf("worker proxy: user=%s method=%s path=%s upload_buffer_error=%v", sess.UserID, r.Method, signedPath, err)
 			writeError(w, http.StatusBadGateway, "Failed to read upload body")
 			return
 		}
-		bodyReader = tmp
-		bodySize = size
-		cleanup = func() {
+		defer func() {
 			name := tmp.Name()
 			_ = tmp.Close()
 			if name != "" {
 				_ = os.Remove(name)
 			}
-		}
+		}()
+		bodyReader = tmp
+		bodySize = size
 
 		if bodyReader != nil {
 			bodyCounter = &countingReadCloser{r: bodyReader}
@@ -247,9 +259,6 @@ func (s *Server) handleWorkerProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	if cleanup != nil {
-		cleanup()
-	}
 
 	copyHeaders(w.Header(), resp.Header, []string{
 		"Content-Type",
@@ -310,13 +319,21 @@ func signWorkerRequest(apiKey, ts, nonce, method, path string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func bufferUploadBody(src io.Reader) (*os.File, int64, error) {
+func bufferUploadBody(src io.Reader, maxBytes int64) (*os.File, int64, error) {
 	tmp, err := os.CreateTemp("", "vestri-upload-*")
 	if err != nil {
 		return nil, 0, err
 	}
 
-	n, err := io.Copy(tmp, src)
+	n, err := io.Copy(tmp, io.LimitReader(src, maxBytes+1))
+	if n > maxBytes {
+		name := tmp.Name()
+		_ = tmp.Close()
+		if name != "" {
+			_ = os.Remove(name)
+		}
+		return nil, n, errWorkerUploadTooLarge
+	}
 	if err != nil {
 		name := tmp.Name()
 		_ = tmp.Close()
