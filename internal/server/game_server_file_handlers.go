@@ -426,6 +426,8 @@ func (s *Server) handleUploadGameServerFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	extendUploadDeadlines(w)
+
 	reader, err := r.MultipartReader()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid multipart form")
@@ -573,6 +575,14 @@ func (s *Server) handleUploadGameServerFile(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// extendUploadDeadlines lifts the global 5 minute Read/WriteTimeout, which would cut off large or slow uploads.
+func extendUploadDeadlines(w http.ResponseWriter) {
+	controller := http.NewResponseController(w)
+	deadline := time.Now().Add(30 * time.Minute)
+	_ = controller.SetReadDeadline(deadline)
+	_ = controller.SetWriteDeadline(deadline)
 }
 
 func resolveServerScopedPath(rootPath, rawPath string, allowRoot bool) (string, error) {

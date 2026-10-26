@@ -205,6 +205,7 @@ func (s *Server) handleUploadGameServerBackup(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusForbidden, "Only server owner/admin can upload backups")
 		return
 	}
+	extendUploadDeadlines(w)
 	r.Body = http.MaxBytesReader(w, r.Body, maxGameServerBackupUploadBytes+(1<<20))
 	reader, err := r.MultipartReader()
 	if err != nil {
