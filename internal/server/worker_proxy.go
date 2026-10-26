@@ -21,8 +21,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"yourapp/internal/auth"
+
+	"github.com/go-chi/chi/v5"
 )
 
 var workerHTTPClient = &http.Client{
