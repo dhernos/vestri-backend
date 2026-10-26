@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -31,9 +33,36 @@ const maxWorkerUploadBytes int64 = 1 << 30
 
 var errWorkerUploadTooLarge = errors.New("worker upload exceeds the maximum size")
 
+// defaultWorkerTCPMSS fits any path MTU >= 1280 (IPv6 minimum), so tunnels such as WireGuard work without a manual MTU.
+const defaultWorkerTCPMSS = 1240
+
+// workerTCPMSS returns the MSS clamp for worker connections; WORKER_TCP_MSS=0 disables it.
+func workerTCPMSS() int {
+	raw := strings.TrimSpace(os.Getenv("WORKER_TCP_MSS"))
+	if raw == "" {
+		return defaultWorkerTCPMSS
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		log.Printf("worker HTTP client: ignoring invalid WORKER_TCP_MSS %q", raw)
+		return defaultWorkerTCPMSS
+	}
+	if value > 0 && value < 536 {
+		return 536
+	}
+	return value
+}
+
 func newWorkerTransport() *http.Transport {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	if mss := workerTCPMSS(); mss > 0 {
+		dialer.Control = func(network, address string, conn syscall.RawConn) error {
+			return setTCPMaxSegment(network, address, conn, mss)
+		}
+	}
 	return &http.Transport{
 		Proxy:                 nil,
+		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     false,
 		DisableKeepAlives:     true,
 		DisableCompression:    true,

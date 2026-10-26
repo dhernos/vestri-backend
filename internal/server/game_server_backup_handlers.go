@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 type gameServerBackupPolicy struct {
@@ -89,6 +90,8 @@ func (s *Server) handleCreateGameServerBackup(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
+	// The worker stops and restarts the server around the archive, which can exceed the global write timeout.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Minute))
 	status, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/backup/create", map[string]string{"root": gameServer.RootPath})
 	s.writeBackupWorkerResponse(w, status, body, err)
 }

@@ -2897,16 +2897,15 @@ func (s *Server) workerStackStatus(ctx context.Context, baseURL *url.URL, apiKey
 	return deriveGameServerState(output), output, nil
 }
 
+// Case-sensitive on purpose: compose prints "Up 3 minutes" in the status column, while names/images are lowercase.
+var composeUpStatusPattern = regexp.MustCompile(`\bUp\b|\brunning\b`)
+
 func deriveGameServerState(output string) string {
-	lower := strings.ToLower(strings.TrimSpace(output))
-	if lower == "" {
+	if strings.TrimSpace(output) == "" {
 		return "down"
 	}
-	if strings.Contains(lower, "running") || strings.Contains(lower, "up") {
+	if composeUpStatusPattern.MatchString(output) {
 		return "up"
-	}
-	if strings.Contains(lower, "exited") || strings.Contains(lower, "dead") || strings.Contains(lower, "created") {
-		return "down"
 	}
 	return "down"
 }
