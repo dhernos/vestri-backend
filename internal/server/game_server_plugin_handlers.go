@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,16 +26,18 @@ const maxTrackedPlugins = 100
 const maxPluginDownloadBytes = 128 << 20
 
 type trackedPlugin struct {
-	ID              string        `json:"id"`
-	Source          pluginSource  `json:"source"`
-	GameVersion     string        `json:"gameVersion"`
-	VelocityVersion string        `json:"velocityVersion,omitempty"`
-	Installed       pluginRelease `json:"installed"`
-	Latest          pluginRelease `json:"latest"`
-	Filenames       []string      `json:"filenames"`
-	CheckedAt       time.Time     `json:"checkedAt"`
-	CheckError      string        `json:"checkError,omitempty"`
-	Pending         bool          `json:"pending"`
+	ID                   string                      `json:"id"`
+	Source               pluginSource                `json:"source"`
+	GameVersion          string                      `json:"gameVersion"`
+	VelocityVersion      string                      `json:"velocityVersion,omitempty"`
+	CompatibilityTargets []pluginCompatibilityTarget `json:"compatibilityTargets,omitempty"`
+	TargetRefs           []string                    `json:"targetRefs,omitempty"`
+	Installed            pluginRelease               `json:"installed"`
+	Latest               pluginRelease               `json:"latest"`
+	Filenames            []string                    `json:"filenames"`
+	CheckedAt            time.Time                   `json:"checkedAt"`
+	CheckError           string                      `json:"checkError,omitempty"`
+	Pending              bool                        `json:"pending"`
 }
 
 type pluginManifest struct {
@@ -143,47 +146,81 @@ func (s *Server) lockPluginGroup(ctx context.Context, serverID string) (func(), 
 	}, nil
 }
 
-func (s *Server) paperPluginTargets(ctx context.Context, userID string, node *auth.WorkerNode, parentID, velocityVersion string) ([]auth.GameServer, string, string, error) {
-	velocityVersion = strings.TrimSpace(velocityVersion)
-	if velocityVersion == "" || strings.EqualFold(velocityVersion, "latest") {
-		return nil, "", "", fmt.Errorf("set an explicit Velocity version first")
-	}
+func (s *Server) paperPluginTargets(ctx context.Context, userID string, node *auth.WorkerNode, parent *auth.GameServer) ([]auth.GameServer, []pluginCompatibilityTarget, error) {
 	servers, err := s.Users.ListGameServersForNode(ctx, node.ID)
 	if err != nil {
-		return nil, "", "", err
+		return nil, nil, err
 	}
-	var targets []auth.GameServer
-	gameVersion := ""
+	targets := make([]auth.GameServer, 0, len(servers)+1)
+	compatibility := make([]pluginCompatibilityTarget, 0, len(servers)+1)
+	parentMetadata := parseGameServerMetadata(parent.Metadata)
+	velocityVersion := strings.TrimSpace(parentMetadata.GameVersion)
+	if velocityVersion != "" && !strings.EqualFold(velocityVersion, "latest") {
+		targets = append(targets, *parent)
+		compatibility = append(compatibility, pluginCompatibilityTarget{
+			ServerRef: parent.ID,
+			Platform:  "VELOCITY",
+			Version:   velocityVersion,
+		})
+	}
 	for _, candidate := range servers {
 		metadata := parseGameServerMetadata(candidate.Metadata)
 		software := strings.ToUpper(strings.TrimSpace(metadata.SoftwareVersion))
-		if metadata.ParentServerID != parentID || (software != "PAPER" && software != "PURPUR") {
+		if metadata.ParentServerID != parent.ID || (software != "PAPER" && software != "PURPUR") {
 			continue
 		}
 		access, err := s.Users.FindAccessibleGameServerByRefForNode(ctx, userID, node, candidate.ID)
 		if err != nil {
-			return nil, "", "", err
+			return nil, nil, err
 		}
 		if access == nil || !canManageGameServerFiles(access.AccessRole) {
-			return nil, "", "", fmt.Errorf("file-management permission is required on every Paper/Purpur subserver")
+			continue
 		}
 		version := strings.TrimSpace(metadata.GameVersion)
 		if version == "" || strings.EqualFold(version, "latest") {
-			return nil, "", "", fmt.Errorf("set an explicit Minecraft version on every Paper/Purpur subserver first")
+			continue
 		}
-		if gameVersion != "" && gameVersion != version {
-			return nil, "", "", fmt.Errorf("Paper/Purpur subservers must use the same Minecraft version for a shared plugin release")
-		}
-		gameVersion = version
 		targets = append(targets, candidate)
+		compatibility = append(compatibility, pluginCompatibilityTarget{
+			ServerRef: candidate.ID,
+			Platform:  "PAPER",
+			Version:   version,
+		})
 	}
-	if len(targets) > maxGroupApplyServers {
-		return nil, "", "", fmt.Errorf("too many subservers")
+	if len(compatibility) > maxGroupApplyServers+1 {
+		return nil, nil, fmt.Errorf("too many plugin targets")
 	}
-	if len(targets) == 0 {
-		return nil, "", "", fmt.Errorf("add a Paper or Purpur subserver with an explicit Minecraft version first")
+	if len(compatibility) == 0 {
+		return nil, nil, fmt.Errorf("add a Paper/Purpur server with an explicit Minecraft version or set an explicit Velocity version first")
 	}
-	return targets, gameVersion, velocityVersion, nil
+	sort.Slice(compatibility, func(i, j int) bool { return compatibility[i].ServerRef < compatibility[j].ServerRef })
+	return targets, compatibility, nil
+}
+
+func samePluginCompatibilityTargets(left, right []pluginCompatibilityTarget) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func pluginTargetsForRefs(targets []auth.GameServer, refs []string) []auth.GameServer {
+	selected := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		selected[ref] = struct{}{}
+	}
+	result := make([]auth.GameServer, 0, len(refs))
+	for _, target := range targets {
+		if _, ok := selected[target.ID]; ok {
+			result = append(result, target)
+		}
+	}
+	return result
 }
 
 func (s *Server) handleTrackedPlugins(w http.ResponseWriter, r *http.Request) {
@@ -235,28 +272,29 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 	if operation == "list" {
-		velocityVersion := strings.TrimSpace(parseGameServerMetadata(parent.Metadata).GameVersion)
+		_, compatibilityTargets, targetsErr := s.paperPluginTargets(ctx, sess.UserID, node, parent)
 		changed := false
 		for index := range manifest.Plugins {
 			plugin := &manifest.Plugins[index]
-			versionChanged := plugin.VelocityVersion != velocityVersion
-			plugin.VelocityVersion = velocityVersion
-			if !versionChanged && time.Since(plugin.CheckedAt) < pluginCheckInterval {
-				continue
-			}
-			if velocityVersion == "" || strings.EqualFold(velocityVersion, "latest") {
-				plugin.CheckError = "set an explicit Velocity version first"
+			targetsChanged := !samePluginCompatibilityTargets(plugin.CompatibilityTargets, compatibilityTargets)
+			plugin.CompatibilityTargets = compatibilityTargets
+			if targetsErr != nil {
+				plugin.CheckError = targetsErr.Error()
 				plugin.CheckedAt = time.Now().UTC()
 				changed = true
 				continue
 			}
-			release, checkErr := latestPluginRelease(ctx, plugin.Source, plugin.GameVersion, velocityVersion)
+			if !targetsChanged && time.Since(plugin.CheckedAt) < pluginCheckInterval {
+				continue
+			}
+			release, targetRefs, checkErr := latestPluginRelease(ctx, plugin.Source, compatibilityTargets)
 			plugin.CheckedAt = time.Now().UTC()
 			plugin.CheckError = ""
 			if checkErr != nil {
 				plugin.CheckError = checkErr.Error()
 			} else {
 				plugin.Latest = release
+				plugin.TargetRefs = targetRefs
 			}
 			changed = true
 		}
@@ -297,8 +335,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		writeJSON(w, http.StatusOK, manifest)
 		return
 	}
-	velocityVersion := strings.TrimSpace(parseGameServerMetadata(parent.Metadata).GameVersion)
-	targets, gameVersion, velocityVersion, err := s.paperPluginTargets(ctx, sess.UserID, node, parent.ID, velocityVersion)
+	targets, compatibilityTargets, err := s.paperPluginTargets(ctx, sess.UserID, node, parent)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -311,7 +348,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		plugin = trackedPlugin{ID: source.Provider + ":" + strings.ToLower(source.Project), Source: source, GameVersion: gameVersion, VelocityVersion: velocityVersion}
+		plugin = trackedPlugin{ID: source.Provider + ":" + strings.ToLower(source.Project), Source: source}
 		for _, existing := range manifest.Plugins {
 			if existing.ID == plugin.ID {
 				writeError(w, http.StatusConflict, "Plugin is already tracked; use its update button")
@@ -333,13 +370,29 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 			writeError(w, http.StatusNotFound, "Tracked plugin not found")
 			return
 		}
-		plugin.GameVersion = gameVersion
-		plugin.VelocityVersion = velocityVersion
 	}
-	release, err := latestPluginRelease(ctx, plugin.Source, gameVersion, velocityVersion)
+	release, targetRefs, err := latestPluginRelease(ctx, plugin.Source, compatibilityTargets)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
+	}
+	plugin.CompatibilityTargets = compatibilityTargets
+	plugin.TargetRefs = targetRefs
+	plugin.GameVersion = ""
+	plugin.VelocityVersion = ""
+	compatibleRefs := make(map[string]struct{}, len(targetRefs))
+	for _, ref := range targetRefs {
+		compatibleRefs[ref] = struct{}{}
+	}
+	for _, target := range compatibilityTargets {
+		if _, ok := compatibleRefs[target.ServerRef]; !ok {
+			continue
+		}
+		if target.Platform == "PAPER" {
+			plugin.GameVersion = target.Version
+		} else if target.Platform == "VELOCITY" {
+			plugin.VelocityVersion = target.Version
+		}
 	}
 	for _, existing := range manifest.Plugins {
 		if existing.ID == plugin.ID {
@@ -390,7 +443,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 	if operation == "update" {
-		for _, target := range targets {
+		for _, target := range pluginTargetsForRefs(targets, targetRefs) {
 			if err := worker.replace(ctx, tempPath, path.Join(target.RootPath, backendPluginsRelativePath), release.Filename, plugin.Filenames); err != nil {
 				writeError(w, http.StatusBadGateway, "Plugin deployment partially completed; retry the update: "+err.Error())
 				return

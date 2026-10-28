@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -390,36 +391,35 @@ func TestLatestHangarPluginRelease(t *testing.T) {
 	requests := 0
 	pluginHTTPClient = &http.Client{Transport: pluginRoundTripper(func(request *http.Request) (*http.Response, error) {
 		requests++
-		platform := request.URL.Query().Get("platform")
-		wantVersion := "1.21.1"
-		if platform == "VELOCITY" {
-			wantVersion = "3.4.0"
-		}
-		wantQuery := url.Values{"limit": {"25"}, "platform": {platform}, "channel": {"Release"}, "platformVersion": {wantVersion}}
-		if request.Method != http.MethodGet || request.URL.Scheme != "https" || request.URL.Host != "hangar.papermc.io" || request.URL.Path != "/api/v1/projects/Example/Plugin/versions" || !reflect.DeepEqual(request.URL.Query(), wantQuery) {
-			t.Errorf("unexpected Hangar metadata request: %s %s", request.Method, request.URL)
-		}
-		body := `{"result":[]}`
-		if platform == "PAPER" {
-			body = `{"result":[
-				{"name":"beta","channel":{"name":"Beta"},"platformDependencies":{"PAPER":["1.21.1"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/beta.jar","fileInfo":{"name":"beta.jar","sha256Hash":"beta-hash"}}}},
-				{"name":"wrong-version","channel":{"name":"Release"},"platformDependencies":{"PAPER":["1.21.10"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/wrong.jar","fileInfo":{"name":"wrong.jar","sha256Hash":"wrong-hash"}}}},
-				{"name":"stable","channel":{"name":"release"},"platformDependencies":{"PAPER":["1.21","1.21.1"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/plugin-2.jar","fileInfo":{"name":"plugin-2.jar","sha256Hash":"stable-hash"}}}}
-			]}`
-		} else {
-			body = `{"result":[
-				{"name":"stable","channel":{"name":"Release"},"platformDependencies":{"VELOCITY":["3.3.0"]},"downloads":{"VELOCITY":{"downloadUrl":"https://hangarcdn.papermc.io/stable.jar","fileInfo":{"name":"stable.jar","sha256Hash":"velocity-hash"}}}},
-				{"name":"stable","channel":{"name":"Release"},"platformDependencies":{"VELOCITY":["3.4.0"]},"downloads":{"VELOCITY":{"downloadUrl":"https://hangarcdn.papermc.io/stable.jar","fileInfo":{"name":"stable.jar","sha256Hash":"velocity-hash"}}}}
-			]}`
+		var body string
+		switch {
+		case request.URL.Host == "hangar.papermc.io":
+			wantQuery := url.Values{"limit": {"25"}, "channel": {"Release"}}
+			if request.Method != http.MethodGet || request.URL.Path != "/api/v1/projects/martijnpu/PrefiX/versions" || !reflect.DeepEqual(request.URL.Query(), wantQuery) {
+				t.Errorf("unexpected Hangar metadata request: %s %s", request.Method, request.URL)
+			}
+			body = `{"result":[{"name":"7.7","channel":{"name":"Release"},"platformDependencies":{"PAPER":["26.2.1"]},"downloads":{"PAPER":{"fileInfo":null,"externalUrl":"https://cdn.modrinth.com/data/oTIEBNzO/versions/n5Z6ELrs/PrefiX-7.7.jar?mr_download_reason=standalone","downloadUrl":null}}}]}`
+		case request.URL.Host == "api.modrinth.com":
+			if request.Method != http.MethodGet || request.URL.Path != "/v2/version/n5Z6ELrs" {
+				t.Errorf("unexpected Modrinth metadata request: %s %s", request.Method, request.URL)
+			}
+			body = `{"files":[{"filename":"PrefiX-7.7.jar","url":"https://cdn.modrinth.com/data/oTIEBNzO/versions/n5Z6ELrs/PrefiX-7.7.jar","hashes":{"sha512":"verified-hash"}}]}`
+		default:
+			t.Errorf("unexpected metadata host: %s", request.URL.Host)
+			return nil, fmt.Errorf("unexpected metadata host")
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
-	release, err := latestPluginRelease(context.Background(), pluginSource{Provider: "hangar", Project: "Example/Plugin"}, "1.21.1", "3.4.0")
-	want := pluginRelease{Version: "stable", Filename: "plugin-2.jar", URL: "https://hangarcdn.papermc.io/plugin-2.jar", SHA256: "stable-hash"}
-	if err != nil || release != want {
-		t.Fatalf("release = %+v, error = %v; want %+v", release, err, want)
+	release, targetRefs, err := latestPluginRelease(context.Background(), pluginSource{Provider: "hangar", Project: "martijnpu/PrefiX"}, []pluginCompatibilityTarget{
+		{ServerRef: "paper-1", Platform: "PAPER", Version: "26.2"},
+		{ServerRef: "paper-2", Platform: "PAPER", Version: "26.2.2"},
+		{ServerRef: "proxy", Platform: "VELOCITY", Version: "3.4.0"},
+	})
+	want := pluginRelease{Version: "7.7", Filename: "PrefiX-7.7.jar", URL: "https://cdn.modrinth.com/data/oTIEBNzO/versions/n5Z6ELrs/PrefiX-7.7.jar", SHA512: "verified-hash"}
+	if err != nil || release != want || !reflect.DeepEqual(targetRefs, []string{"paper-1", "paper-2"}) {
+		t.Fatalf("release = %+v, targetRefs = %v, error = %v; want %+v and both 26.2.x Paper targets", release, targetRefs, err, want)
 	}
 	if requests != 2 {
-		t.Errorf("Hangar requests = %d, want 2", requests)
+		t.Errorf("metadata requests = %d, want 2", requests)
 	}
 }
