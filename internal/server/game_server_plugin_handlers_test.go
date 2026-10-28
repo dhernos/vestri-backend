@@ -390,23 +390,36 @@ func TestLatestHangarPluginRelease(t *testing.T) {
 	requests := 0
 	pluginHTTPClient = &http.Client{Transport: pluginRoundTripper(func(request *http.Request) (*http.Response, error) {
 		requests++
-		wantQuery := url.Values{"limit": {"25"}, "platform": {"PAPER"}, "channel": {"Release"}, "platformVersion": {"1.21.1"}}
+		platform := request.URL.Query().Get("platform")
+		wantVersion := "1.21.1"
+		if platform == "VELOCITY" {
+			wantVersion = "3.4.0"
+		}
+		wantQuery := url.Values{"limit": {"25"}, "platform": {platform}, "channel": {"Release"}, "platformVersion": {wantVersion}}
 		if request.Method != http.MethodGet || request.URL.Scheme != "https" || request.URL.Host != "hangar.papermc.io" || request.URL.Path != "/api/v1/projects/Example/Plugin/versions" || !reflect.DeepEqual(request.URL.Query(), wantQuery) {
 			t.Errorf("unexpected Hangar metadata request: %s %s", request.Method, request.URL)
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"result":[
-			{"name":"beta","channel":{"name":"Beta"},"platformDependencies":{"PAPER":["1.21.1"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/beta.jar","fileInfo":{"name":"beta.jar","sha256Hash":"beta-hash"}}}},
-			{"name":"velocity-only","channel":{"name":"Release"},"platformDependencies":{"PAPER":["1.21.1"]},"downloads":{"VELOCITY":{"downloadUrl":"https://hangarcdn.papermc.io/velocity.jar","fileInfo":{"name":"velocity.jar","sha256Hash":"velocity-hash"}}}},
-			{"name":"wrong-version","channel":{"name":"Release"},"platformDependencies":{"PAPER":["1.21.10"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/wrong.jar","fileInfo":{"name":"wrong.jar","sha256Hash":"wrong-hash"}}}},
-			{"name":"stable","channel":{"name":"release"},"platformDependencies":{"PAPER":["1.21","1.21.1"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/plugin-2.jar","fileInfo":{"name":"plugin-2.jar","sha256Hash":"stable-hash"}}}}
-		]}`))}, nil
+		body := `{"result":[]}`
+		if platform == "PAPER" {
+			body = `{"result":[
+				{"name":"beta","channel":{"name":"Beta"},"platformDependencies":{"PAPER":["1.21.1"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/beta.jar","fileInfo":{"name":"beta.jar","sha256Hash":"beta-hash"}}}},
+				{"name":"wrong-version","channel":{"name":"Release"},"platformDependencies":{"PAPER":["1.21.10"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/wrong.jar","fileInfo":{"name":"wrong.jar","sha256Hash":"wrong-hash"}}}},
+				{"name":"stable","channel":{"name":"release"},"platformDependencies":{"PAPER":["1.21","1.21.1"]},"downloads":{"PAPER":{"downloadUrl":"https://hangarcdn.papermc.io/plugin-2.jar","fileInfo":{"name":"plugin-2.jar","sha256Hash":"stable-hash"}}}}
+			]}`
+		} else {
+			body = `{"result":[
+				{"name":"stable","channel":{"name":"Release"},"platformDependencies":{"VELOCITY":["3.3.0"]},"downloads":{"VELOCITY":{"downloadUrl":"https://hangarcdn.papermc.io/stable.jar","fileInfo":{"name":"stable.jar","sha256Hash":"velocity-hash"}}}},
+				{"name":"stable","channel":{"name":"Release"},"platformDependencies":{"VELOCITY":["3.4.0"]},"downloads":{"VELOCITY":{"downloadUrl":"https://hangarcdn.papermc.io/stable.jar","fileInfo":{"name":"stable.jar","sha256Hash":"velocity-hash"}}}}
+			]}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
-	release, err := latestPluginRelease(context.Background(), pluginSource{Provider: "hangar", Project: "Example/Plugin"}, "1.21.1")
+	release, err := latestPluginRelease(context.Background(), pluginSource{Provider: "hangar", Project: "Example/Plugin"}, "1.21.1", "3.4.0")
 	want := pluginRelease{Version: "stable", Filename: "plugin-2.jar", URL: "https://hangarcdn.papermc.io/plugin-2.jar", SHA256: "stable-hash"}
 	if err != nil || release != want {
 		t.Fatalf("release = %+v, error = %v; want %+v", release, err, want)
 	}
-	if requests != 1 {
-		t.Errorf("Hangar requests = %d, want 1", requests)
+	if requests != 2 {
+		t.Errorf("Hangar requests = %d, want 2", requests)
 	}
 }

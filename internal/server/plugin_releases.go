@@ -90,19 +90,24 @@ func pluginAPIJSON(ctx context.Context, endpoint string, dest interface{}) error
 	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(dest)
 }
 
-func latestPluginRelease(ctx context.Context, source pluginSource, minecraftVersion string) (pluginRelease, error) {
+func latestPluginRelease(ctx context.Context, source pluginSource, minecraftVersion, velocityVersion string) (pluginRelease, error) {
 	var release pluginRelease
+	if strings.TrimSpace(velocityVersion) == "" || strings.EqualFold(strings.TrimSpace(velocityVersion), "latest") {
+		return release, fmt.Errorf("set an explicit Velocity version first")
+	}
 	switch source.Provider {
 	case "modrinth":
-		query := url.Values{"loaders": {`["paper"]`}}
+		query := url.Values{"loaders": {`["paper","velocity"]`}}
 		if minecraftVersion != "" {
 			versions, _ := json.Marshal([]string{minecraftVersion})
 			query.Set("game_versions", string(versions))
 		}
 		var versions []struct {
-			ID          string `json:"id"`
-			VersionType string `json:"version_type"`
-			Files       []struct {
+			ID           string   `json:"id"`
+			VersionType  string   `json:"version_type"`
+			Loaders      []string `json:"loaders"`
+			GameVersions []string `json:"game_versions"`
+			Files        []struct {
 				Filename string `json:"filename"`
 				URL      string `json:"url"`
 				Primary  bool   `json:"primary"`
@@ -118,6 +123,9 @@ func latestPluginRelease(ctx context.Context, source pluginSource, minecraftVers
 			if version.VersionType != "release" {
 				continue
 			}
+			if !containsPluginValue(version.Loaders, "paper") || !containsPluginValue(version.Loaders, "velocity") || !containsPluginValue(version.GameVersions, minecraftVersion) {
+				continue
+			}
 			for _, file := range version.Files {
 				if file.Primary && strings.HasSuffix(strings.ToLower(file.Filename), ".jar") {
 					release = pluginRelease{Version: version.ID, Filename: file.Filename, URL: file.URL, SHA512: file.Hashes.SHA512}
@@ -129,7 +137,7 @@ func latestPluginRelease(ctx context.Context, source pluginSource, minecraftVers
 			}
 		}
 	case "hangar":
-		var versions struct {
+		type hangarReleaseResponse struct {
 			Result []struct {
 				Name    string `json:"name"`
 				Channel struct {
@@ -145,40 +153,38 @@ func latestPluginRelease(ctx context.Context, source pluginSource, minecraftVers
 				} `json:"downloads"`
 			} `json:"result"`
 		}
-		query := url.Values{"limit": {"25"}, "platform": {"PAPER"}, "channel": {"Release"}}
-		if minecraftVersion != "" {
-			query.Set("platformVersion", minecraftVersion)
-		}
-		if err := pluginAPIJSON(ctx, "https://hangar.papermc.io/api/v1/projects/"+source.Project+"/versions?"+query.Encode(), &versions); err != nil {
-			return release, err
-		}
-		for _, version := range versions.Result {
-			if !strings.EqualFold(version.Channel.Name, "release") {
-				continue
+		platformReleases := make(map[string]pluginRelease)
+		for _, target := range []struct{ platform, version string }{{"PAPER", minecraftVersion}, {"VELOCITY", velocityVersion}} {
+			var versions hangarReleaseResponse
+			query := url.Values{"limit": {"25"}, "platform": {target.platform}, "channel": {"Release"}, "platformVersion": {target.version}}
+			endpoint := "https://hangar.papermc.io/api/v1/projects/" + source.Project + "/versions?" + query.Encode()
+			if err := pluginAPIJSON(ctx, endpoint, &versions); err != nil {
+				return release, err
 			}
-			download, found := version.Downloads["PAPER"]
-			if !found {
-				continue
-			}
-			if minecraftVersion != "" {
-				compatible := false
-				for _, supported := range version.PlatformDependencies["PAPER"] {
-					if supported == minecraftVersion {
-						compatible = true
-					}
-				}
-				if !compatible {
+			for _, version := range versions.Result {
+				if !strings.EqualFold(version.Channel.Name, "release") || !containsPluginValue(version.PlatformDependencies[target.platform], target.version) {
 					continue
 				}
+				download, found := version.Downloads[target.platform]
+				if !found {
+					continue
+				}
+				if target.platform == "PAPER" {
+					platformReleases[version.Name] = pluginRelease{Version: version.Name, Filename: download.FileInfo.Name, URL: download.DownloadURL, SHA256: download.FileInfo.SHA256}
+				} else if paperRelease, found := platformReleases[version.Name]; found {
+					release = paperRelease
+					break
+				}
 			}
-			release = pluginRelease{Version: version.Name, Filename: download.FileInfo.Name, URL: download.DownloadURL, SHA256: download.FileInfo.SHA256}
-			break
+			if target.platform == "VELOCITY" || release.Version != "" {
+				break
+			}
 		}
 	default:
 		return release, fmt.Errorf("unsupported plugin provider")
 	}
 	if release.Version == "" {
-		return release, fmt.Errorf("no stable Paper release found for this Minecraft version")
+		return release, fmt.Errorf("no stable plugin release supports both Minecraft %s and Velocity %s", minecraftVersion, velocityVersion)
 	}
 	if !safeSatisfactoryDirectoryName(release.Filename) || path.Base(release.Filename) != release.Filename || !strings.HasSuffix(strings.ToLower(release.Filename), ".jar") {
 		return pluginRelease{}, fmt.Errorf("provider returned an invalid plugin filename")
@@ -191,4 +197,13 @@ func latestPluginRelease(ctx context.Context, source pluginSource, minecraftVers
 		return pluginRelease{}, fmt.Errorf("provider did not supply a plugin checksum")
 	}
 	return release, nil
+}
+
+func containsPluginValue(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, wanted) {
+			return true
+		}
+	}
+	return false
 }
