@@ -85,6 +85,8 @@ var endpointAccess = []AccessRule{
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/files/unzip", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/files/download", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/files/upload", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/whitelist", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/whitelist", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/list", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/read", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/files/write", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
