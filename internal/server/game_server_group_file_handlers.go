@@ -129,6 +129,12 @@ func (s *Server) handleApplyGroupFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Plugin staging is only available for velocity servers")
 		return
 	}
+	unlock, err := s.lockPluginGroup(r.Context(), server.ID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	defer unlock()
 
 	var req applyGroupFilesRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -197,6 +203,12 @@ func (s *Server) handleApplyGroupFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stagingPlugins := path.Join(server.RootPath, velocityPluginStagingRelativePath, stagingPluginsDirName)
+	worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey, root: server.RootPath}
+	manifest, err := worker.load(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
 	var files []string
 	if err := s.collectWorkerFiles(r.Context(), baseURL, apiKey, stagingPlugins, "", 0, &files); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to read staged plugins")
@@ -216,9 +228,31 @@ func (s *Server) handleApplyGroupFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "No staged plugin files to apply")
 		return
 	}
+	trackedFiles := make(map[string]trackedPlugin)
+	for _, plugin := range manifest.Plugins {
+		trackedFiles[plugin.Installed.Filename] = plugin
+		if plugin.Pending {
+			for _, filename := range plugin.Filenames {
+				trackedFiles[filename] = plugin
+			}
+		}
+	}
+	for _, rel := range files {
+		if plugin, tracked := trackedFiles[rel]; tracked && plugin.Pending {
+			writeError(w, http.StatusConflict, "Complete the pending plugin update before copying staged plugins")
+			return
+		}
+	}
 
 	for _, root := range targetRoots {
 		for _, rel := range files {
+			if plugin, tracked := trackedFiles[rel]; tracked {
+				if err := worker.replace(r.Context(), path.Join(stagingPlugins, rel), path.Join(root, backendPluginsRelativePath), rel, plugin.Filenames); err != nil {
+					writeError(w, http.StatusBadGateway, "Tracked plugin copy failed: "+err.Error())
+					return
+				}
+				continue
+			}
 			statusCode, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/copy", map[string]string{
 				"source": path.Join(stagingPlugins, rel),
 				"dest":   path.Join(root, backendPluginsRelativePath, rel),

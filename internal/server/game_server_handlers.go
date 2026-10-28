@@ -804,6 +804,13 @@ func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if supportsGameServerDatabases(server) {
+		if err := s.ensureNoGameServerDatabases(r.Context(), baseURL, apiKey, server); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
+
 	if parentVelocityServer != nil {
 		if err := s.unregisterVelocityBackendFromProxy(r.Context(), baseURL, apiKey, parentVelocityServer, server.Slug); err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to update velocity server configuration")
