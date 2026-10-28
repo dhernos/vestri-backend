@@ -171,6 +171,10 @@ func (s *Server) handleApplyGroupFiles(w http.ResponseWriter, r *http.Request) {
 
 	targetRoots := make([]string, 0, len(refs))
 	for _, ref := range refs {
+		if ref == server.ID {
+			targetRoots = append(targetRoots, server.RootPath)
+			continue
+		}
 		access, err := s.Users.FindAccessibleGameServerByRefForNode(r.Context(), sess.UserID, node, ref)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to load game server")
