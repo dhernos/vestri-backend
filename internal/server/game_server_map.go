@@ -62,12 +62,22 @@ func (s *Server) handleGameServerMap(w http.ResponseWriter, r *http.Request) {
 			redirect.RawPath = ""
 			resp.Header.Set("Location", redirect.String())
 		}
-		resp.Header.Set("X-Frame-Options", "SAMEORIGIN")
-		resp.Header.Set("Content-Security-Policy", blueMapContentSecurityPolicy)
-		resp.Header.Set("Cache-Control", "private, no-store")
+		setBlueMapResponseHeaders(w.Header(), resp.Header)
 		resp.Header.Del("Set-Cookie")
 		return nil
 	})
+}
+
+func setBlueMapResponseHeaders(dst, upstream http.Header) {
+	// ReverseProxy appends upstream headers to those already set by secureHeaders.
+	for name, value := range map[string]string{
+		"X-Frame-Options":         "SAMEORIGIN",
+		"Content-Security-Policy": blueMapContentSecurityPolicy,
+		"Cache-Control":           "private, no-store",
+	} {
+		dst.Del(name)
+		upstream.Set(name, value)
+	}
 }
 
 const blueMapContentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'self'; object-src 'none'; base-uri 'self'; form-action 'none'"

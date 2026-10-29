@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"yourapp/internal/auth"
@@ -47,6 +48,9 @@ func TestMapRoutesRequireSession(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s returned %d, want 401", route, rec.Code)
 		}
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("unauthorized response lost its default frame policy: %q", got)
+		}
 	}
 }
 
@@ -72,17 +76,41 @@ func TestSignedMapProxyPreservesEncodedPathsAndResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/nodes/node/servers/server/map/view/maps/My%20World/tile.json", nil)
 	req.Header.Set("Cookie", "session_id=private")
 	rec := httptest.NewRecorder()
-	(&Server{}).proxySignedWorkerGET(rec, req, baseURL, apiKey,
-		"/stack/bluemap/view/maps/My%20World/tile.json?root=server&stack=server", false,
-		func(resp *http.Response) error {
-			resp.Header.Set("X-Frame-Options", "SAMEORIGIN")
-			resp.Header.Set("Content-Security-Policy", blueMapContentSecurityPolicy)
-			return nil
-		})
+	handler := secureHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		(&Server{}).proxySignedWorkerGET(w, r, baseURL, apiKey,
+			"/stack/bluemap/view/maps/My%20World/tile.json?root=server&stack=server", false,
+			func(resp *http.Response) error {
+				setBlueMapResponseHeaders(w.Header(), resp.Header)
+				return nil
+			})
+	}))
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || rec.Body.String() != "compressed-tile-bytes" {
 		t.Fatalf("proxy response changed: %d %s", rec.Code, rec.Body)
 	}
 	if rec.Header().Get("Content-Encoding") != "gzip" || rec.Header().Get("X-Frame-Options") != "SAMEORIGIN" {
 		t.Fatal("map response headers were not preserved")
+	}
+	if values := rec.Header().Values("Content-Security-Policy"); len(values) != 1 || values[0] != blueMapContentSecurityPolicy {
+		t.Fatalf("map must have exactly one embedding-compatible CSP, got %q", values)
+	}
+	if values := rec.Header().Values("X-Frame-Options"); len(values) != 1 || values[0] != "SAMEORIGIN" {
+		t.Fatalf("map must have exactly one SAMEORIGIN frame policy, got %q", values)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("map lost unrelated security headers: %q", got)
+	}
+}
+
+func TestBlueMapHeadersDoNotChangeOrdinaryResponses(t *testing.T) {
+	rec := httptest.NewRecorder()
+	secureHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/me", nil))
+	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("ordinary response frame policy changed: %q", got)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("ordinary response CSP changed: %q", got)
 	}
 }
