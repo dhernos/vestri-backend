@@ -590,7 +590,7 @@ func normalizeConsoleExecSessionID(raw string) string {
 	return value
 }
 
-func (s *Server) proxySignedWorkerGET(w http.ResponseWriter, r *http.Request, baseURL *url.URL, apiKey, workerPath string, requireUpgrade bool) {
+func (s *Server) proxySignedWorkerGET(w http.ResponseWriter, r *http.Request, baseURL *url.URL, apiKey, workerPath string, requireUpgrade bool, responseModifiers ...func(*http.Response) error) {
 	if requireUpgrade && !isWebsocketUpgradeRequest(r) {
 		writeError(w, http.StatusBadRequest, "WebSocket upgrade required")
 		return
@@ -603,7 +603,7 @@ func (s *Server) proxySignedWorkerGET(w http.ResponseWriter, r *http.Request, ba
 	}
 
 	pathname := "/" + strings.TrimPrefix(parsedPath.Path, "/")
-	signedPath := pathname
+	signedPath := (&url.URL{Path: joinWorkerPath(baseURL.Path, pathname)}).EscapedPath()
 	if parsedPath.RawQuery != "" {
 		signedPath += "?" + parsedPath.RawQuery
 	}
@@ -617,6 +617,11 @@ func (s *Server) proxySignedWorkerGET(w http.ResponseWriter, r *http.Request, ba
 		proxy.FlushInterval = -1
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		for _, modify := range responseModifiers {
+			if err := modify(resp); err != nil {
+				return err
+			}
+		}
 		log.Printf("worker console proxy response method=%s path=%s status=%d", resp.Request.Method, signedPath, resp.StatusCode)
 		return nil
 	}
@@ -630,6 +635,7 @@ func (s *Server) proxySignedWorkerGET(w http.ResponseWriter, r *http.Request, ba
 		director(req)
 		req.Method = http.MethodGet
 		req.URL.Path = joinWorkerPath(baseURL.Path, pathname)
+		req.URL.RawPath = ""
 		req.URL.RawQuery = parsedPath.RawQuery
 		req.Host = baseURL.Host
 		req.Header.Del("Cookie")
