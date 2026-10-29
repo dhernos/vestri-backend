@@ -14,8 +14,11 @@ import (
 )
 
 type pluginSource struct {
-	Provider string `json:"provider"`
-	Project  string `json:"project"`
+	Provider    string `json:"provider"`
+	Project     string `json:"project"`
+	Version     string `json:"version,omitempty"`
+	Platform    string `json:"platform,omitempty"`
+	DownloadURL string `json:"downloadUrl,omitempty"`
 }
 
 type pluginRelease struct {
@@ -67,6 +70,17 @@ func parsePluginSource(raw string) (pluginSource, error) {
 		}
 		return true
 	}
+	validArtifactPart := func(value string) bool {
+		if value == "" || len(value) > 150 || value == "." || value == ".." {
+			return false
+		}
+		for _, char := range value {
+			if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-' || char == '_' || char == '.') {
+				return false
+			}
+		}
+		return true
+	}
 	switch strings.ToLower(parsed.Host) {
 	case "modrinth.com", "www.modrinth.com":
 		if len(parts) >= 2 && parts[0] == "plugin" && validPart(parts[1]) {
@@ -76,8 +90,23 @@ func parsePluginSource(raw string) (pluginSource, error) {
 		if len(parts) >= 2 && validPart(parts[0]) && validPart(parts[1]) {
 			return pluginSource{Provider: "hangar", Project: parts[0] + "/" + parts[1]}, nil
 		}
+	case "hangarcdn.papermc.io":
+		if parsed.RawQuery != "" || parsed.Fragment != "" || len(parts) != 7 || parts[0] != "plugins" || parts[3] != "versions" || !validPart(parts[1]) || !validPart(parts[2]) || !validArtifactPart(parts[4]) || !validPart(parts[5]) || !validArtifactPart(parts[6]) || !strings.HasSuffix(strings.ToLower(parts[6]), ".jar") {
+			break
+		}
+		platform := strings.ToUpper(parts[5])
+		if platform != "PAPER" && platform != "VELOCITY" {
+			break
+		}
+		return pluginSource{
+			Provider:    "hangar",
+			Project:     parts[1] + "/" + parts[2],
+			Version:     parts[4],
+			Platform:    platform,
+			DownloadURL: parsed.String(),
+		}, nil
 	}
-	return pluginSource{}, fmt.Errorf("use a Modrinth /plugin/project or Hangar /author/project link")
+	return pluginSource{}, fmt.Errorf("use a Modrinth /plugin/project, Hangar /author/project, or Hangar CDN JAR link")
 }
 
 func trustedPluginDownloadURL(target *url.URL) bool {
@@ -114,115 +143,149 @@ func latestPluginRelease(ctx context.Context, source pluginSource, targets []plu
 	if len(targets) == 0 {
 		return release, nil, fmt.Errorf("no versioned plugin targets are available")
 	}
-	switch source.Provider {
-	case "modrinth":
-		loaders := make([]string, 0, len(targets))
-		for _, target := range targets {
-			loader := strings.ToLower(target.Platform)
-			if !containsPluginValue(loaders, loader) {
-				loaders = append(loaders, loader)
-			}
+	if source.Version != "" {
+		if source.Provider != "hangar" || source.Platform == "" || source.DownloadURL == "" {
+			return release, nil, fmt.Errorf("invalid pinned Hangar plugin source")
 		}
-		loaderFilter, _ := json.Marshal(loaders)
-		query := url.Values{"loaders": {string(loaderFilter)}}
-		var versions []struct {
-			ID           string   `json:"id"`
-			VersionType  string   `json:"version_type"`
-			Loaders      []string `json:"loaders"`
-			GameVersions []string `json:"game_versions"`
-			Files        []struct {
-				Filename string `json:"filename"`
-				URL      string `json:"url"`
-				Primary  bool   `json:"primary"`
-				Hashes   struct {
-					SHA512 string `json:"sha512"`
-				} `json:"hashes"`
-			} `json:"files"`
+		var version struct {
+			Name      string                    `json:"name"`
+			Downloads map[string]hangarDownload `json:"downloads"`
 		}
-		if err := pluginAPIJSON(ctx, "https://api.modrinth.com/v2/project/"+url.PathEscape(source.Project)+"/version?"+query.Encode(), &versions); err != nil {
+		endpoint := "https://hangar.papermc.io/api/v1/projects/" + source.Project + "/versions/" + url.PathEscape(source.Version)
+		if err := pluginAPIJSON(ctx, endpoint, &version); err != nil {
 			return release, nil, err
 		}
-		for _, version := range versions {
-			if version.VersionType != "release" {
-				continue
+		if version.Name != source.Version {
+			return release, nil, fmt.Errorf("Hangar returned a different plugin version than requested")
+		}
+		download, found := version.Downloads[source.Platform]
+		if !found {
+			return release, nil, fmt.Errorf("pinned Hangar version has no %s download", source.Platform)
+		}
+		resolved, err := resolveHangarDownload(ctx, download.FileInfo, download.DownloadURL, download.ExternalURL)
+		if err != nil {
+			return release, nil, err
+		}
+		if resolved.URL != source.DownloadURL {
+			return release, nil, fmt.Errorf("Hangar version does not match the supplied download link")
+		}
+		release = pluginRelease{Version: version.Name, Filename: resolved.Filename, URL: resolved.URL, SHA256: resolved.SHA256, SHA512: resolved.SHA512}
+		for _, target := range targets {
+			if strings.EqualFold(target.Platform, source.Platform) {
+				compatibleRefs = append(compatibleRefs, target.ServerRef)
 			}
-			candidateRefs := make([]string, 0, len(targets))
+		}
+		if len(compatibleRefs) == 0 {
+			return pluginRelease{}, nil, fmt.Errorf("no configured server supports the pinned Hangar platform")
+		}
+	} else {
+		switch source.Provider {
+		case "modrinth":
+			loaders := make([]string, 0, len(targets))
 			for _, target := range targets {
 				loader := strings.ToLower(target.Platform)
-				if containsPluginValue(version.Loaders, loader) && (loader == "velocity" || containsPluginVersionLine(version.GameVersions, target.Version)) {
-					candidateRefs = append(candidateRefs, target.ServerRef)
+				if !containsPluginValue(loaders, loader) {
+					loaders = append(loaders, loader)
 				}
 			}
-			if len(candidateRefs) == 0 {
-				continue
+			loaderFilter, _ := json.Marshal(loaders)
+			query := url.Values{"loaders": {string(loaderFilter)}}
+			var versions []struct {
+				ID           string   `json:"id"`
+				VersionType  string   `json:"version_type"`
+				Loaders      []string `json:"loaders"`
+				GameVersions []string `json:"game_versions"`
+				Files        []struct {
+					Filename string `json:"filename"`
+					URL      string `json:"url"`
+					Primary  bool   `json:"primary"`
+					Hashes   struct {
+						SHA512 string `json:"sha512"`
+					} `json:"hashes"`
+				} `json:"files"`
 			}
-			for _, file := range version.Files {
-				if file.Primary && strings.HasSuffix(strings.ToLower(file.Filename), ".jar") {
-					release = pluginRelease{Version: version.ID, Filename: file.Filename, URL: file.URL, SHA512: file.Hashes.SHA512}
+			if err := pluginAPIJSON(ctx, "https://api.modrinth.com/v2/project/"+url.PathEscape(source.Project)+"/version?"+query.Encode(), &versions); err != nil {
+				return release, nil, err
+			}
+			for _, version := range versions {
+				if version.VersionType != "release" {
+					continue
+				}
+				candidateRefs := make([]string, 0, len(targets))
+				for _, target := range targets {
+					loader := strings.ToLower(target.Platform)
+					if containsPluginValue(version.Loaders, loader) {
+						candidateRefs = append(candidateRefs, target.ServerRef)
+					}
+				}
+				if len(candidateRefs) == 0 {
+					continue
+				}
+				for _, file := range version.Files {
+					if file.Primary && strings.HasSuffix(strings.ToLower(file.Filename), ".jar") {
+						release = pluginRelease{Version: version.ID, Filename: file.Filename, URL: file.URL, SHA512: file.Hashes.SHA512}
+						break
+					}
+				}
+				if release.Version != "" {
+					compatibleRefs = candidateRefs
 					break
 				}
 			}
-			if release.Version != "" {
-				compatibleRefs = candidateRefs
-				break
+		case "hangar":
+			type hangarReleaseResponse struct {
+				Result []struct {
+					Name    string `json:"name"`
+					Channel struct {
+						Name string `json:"name"`
+					} `json:"channel"`
+					PlatformDependencies map[string][]string       `json:"platformDependencies"`
+					Downloads            map[string]hangarDownload `json:"downloads"`
+				} `json:"result"`
 			}
-		}
-	case "hangar":
-		type hangarReleaseResponse struct {
-			Result []struct {
-				Name    string `json:"name"`
-				Channel struct {
-					Name string `json:"name"`
-				} `json:"channel"`
-				PlatformDependencies map[string][]string       `json:"platformDependencies"`
-				Downloads            map[string]hangarDownload `json:"downloads"`
-			} `json:"result"`
-		}
-		var versions hangarReleaseResponse
-		query := url.Values{"limit": {"25"}, "channel": {"Release"}}
-		endpoint := "https://hangar.papermc.io/api/v1/projects/" + source.Project + "/versions?" + query.Encode()
-		if err := pluginAPIJSON(ctx, endpoint, &versions); err != nil {
-			return release, nil, err
-		}
-		for _, version := range versions.Result {
-			if !strings.EqualFold(version.Channel.Name, "release") {
-				continue
+			var versions hangarReleaseResponse
+			query := url.Values{"limit": {"25"}, "channel": {"Release"}}
+			endpoint := "https://hangar.papermc.io/api/v1/projects/" + source.Project + "/versions?" + query.Encode()
+			if err := pluginAPIJSON(ctx, endpoint, &versions); err != nil {
+				return release, nil, err
 			}
-			var candidate pluginRelease
-			candidateRefs := make([]string, 0, len(targets))
-			resolvedDownloads := make(map[string]pluginRelease)
-			for _, target := range targets {
-				platform := strings.ToUpper(target.Platform)
-				if !containsPluginVersionLine(version.PlatformDependencies[platform], target.Version) {
+			for _, version := range versions.Result {
+				if !strings.EqualFold(version.Channel.Name, "release") {
 					continue
 				}
-				download, found := version.Downloads[platform]
-				if !found {
-					continue
-				}
-				resolved, cached := resolvedDownloads[platform]
-				if !cached {
-					var err error
-					resolved, err = resolveHangarDownload(ctx, download.FileInfo, download.DownloadURL, download.ExternalURL)
-					if err != nil {
-						return release, nil, err
+				var candidate pluginRelease
+				candidateRefs := make([]string, 0, len(targets))
+				resolvedDownloads := make(map[string]pluginRelease)
+				for _, target := range targets {
+					platform := strings.ToUpper(target.Platform)
+					download, found := version.Downloads[platform]
+					if !found {
+						continue
 					}
-					resolvedDownloads[platform] = resolved
+					resolved, cached := resolvedDownloads[platform]
+					if !cached {
+						var err error
+						resolved, err = resolveHangarDownload(ctx, download.FileInfo, download.DownloadURL, download.ExternalURL)
+						if err != nil {
+							return release, nil, err
+						}
+						resolvedDownloads[platform] = resolved
+					}
+					if candidate.Version == "" {
+						candidate = pluginRelease{Version: version.Name, Filename: resolved.Filename, URL: resolved.URL, SHA256: resolved.SHA256, SHA512: resolved.SHA512}
+					}
+					if resolved.Filename == candidate.Filename && resolved.URL == candidate.URL && resolved.SHA256 == candidate.SHA256 && resolved.SHA512 == candidate.SHA512 {
+						candidateRefs = append(candidateRefs, target.ServerRef)
+					}
 				}
-				if candidate.Version == "" {
-					candidate = pluginRelease{Version: version.Name, Filename: resolved.Filename, URL: resolved.URL, SHA256: resolved.SHA256, SHA512: resolved.SHA512}
-				}
-				if resolved.Filename == candidate.Filename && resolved.URL == candidate.URL && resolved.SHA256 == candidate.SHA256 && resolved.SHA512 == candidate.SHA512 {
-					candidateRefs = append(candidateRefs, target.ServerRef)
+				if candidate.Version != "" {
+					release, compatibleRefs = candidate, candidateRefs
+					break
 				}
 			}
-			if candidate.Version != "" {
-				release, compatibleRefs = candidate, candidateRefs
-				break
-			}
+		default:
+			return release, nil, fmt.Errorf("unsupported plugin provider")
 		}
-	default:
-		return release, nil, fmt.Errorf("unsupported plugin provider")
 	}
 	if release.Version == "" {
 		return release, nil, fmt.Errorf("no stable plugin release supports any configured server")
@@ -295,35 +358,4 @@ func containsPluginValue(values []string, wanted string) bool {
 		}
 	}
 	return false
-}
-
-func containsPluginVersionLine(values []string, wanted string) bool {
-	wantedLine := pluginVersionLine(wanted)
-	if wantedLine == "" {
-		return false
-	}
-	for _, value := range values {
-		if pluginVersionLine(value) == wantedLine {
-			return true
-		}
-	}
-	return false
-}
-
-func pluginVersionLine(version string) string {
-	parts := strings.Split(strings.TrimSpace(version), ".")
-	if len(parts) < 2 {
-		return ""
-	}
-	for _, part := range parts[:2] {
-		if part == "" {
-			return ""
-		}
-		for _, digit := range part {
-			if digit < '0' || digit > '9' {
-				return ""
-			}
-		}
-	}
-	return parts[0] + "." + parts[1]
 }

@@ -155,14 +155,12 @@ func (s *Server) paperPluginTargets(ctx context.Context, userID string, node *au
 	compatibility := make([]pluginCompatibilityTarget, 0, len(servers)+1)
 	parentMetadata := parseGameServerMetadata(parent.Metadata)
 	velocityVersion := strings.TrimSpace(parentMetadata.GameVersion)
-	if velocityVersion != "" && !strings.EqualFold(velocityVersion, "latest") {
-		targets = append(targets, *parent)
-		compatibility = append(compatibility, pluginCompatibilityTarget{
-			ServerRef: parent.ID,
-			Platform:  "VELOCITY",
-			Version:   velocityVersion,
-		})
-	}
+	targets = append(targets, *parent)
+	compatibility = append(compatibility, pluginCompatibilityTarget{
+		ServerRef: parent.ID,
+		Platform:  "VELOCITY",
+		Version:   velocityVersion,
+	})
 	for _, candidate := range servers {
 		metadata := parseGameServerMetadata(candidate.Metadata)
 		software := strings.ToUpper(strings.TrimSpace(metadata.SoftwareVersion))
@@ -177,9 +175,6 @@ func (s *Server) paperPluginTargets(ctx context.Context, userID string, node *au
 			continue
 		}
 		version := strings.TrimSpace(metadata.GameVersion)
-		if version == "" || strings.EqualFold(version, "latest") {
-			continue
-		}
 		targets = append(targets, candidate)
 		compatibility = append(compatibility, pluginCompatibilityTarget{
 			ServerRef: candidate.ID,
@@ -278,6 +273,14 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 			plugin := &manifest.Plugins[index]
 			targetsChanged := !samePluginCompatibilityTargets(plugin.CompatibilityTargets, compatibilityTargets)
 			plugin.CompatibilityTargets = compatibilityTargets
+			if plugin.Source.Version != "" {
+				if plugin.Latest != plugin.Installed || plugin.CheckError != "" {
+					plugin.Latest = plugin.Installed
+					plugin.CheckError = ""
+					changed = true
+				}
+				continue
+			}
 			if targetsErr != nil {
 				plugin.CheckError = targetsErr.Error()
 				plugin.CheckedAt = time.Now().UTC()
@@ -368,6 +371,10 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		}
 		if index < 0 {
 			writeError(w, http.StatusNotFound, "Tracked plugin not found")
+			return
+		}
+		if operation == "update" && plugin.Source.Version != "" && !plugin.Pending {
+			writeError(w, http.StatusBadRequest, "Pinned plugin versions cannot be updated")
 			return
 		}
 	}
@@ -540,13 +547,13 @@ func downloadVerifiedPlugin(ctx context.Context, release pluginRelease) (*os.Fil
 	}
 	valid := false
 	for _, entry := range archive.File {
-		if entry.Name == "plugin.yml" || entry.Name == "paper-plugin.yml" {
+		if entry.Name == "plugin.yml" || entry.Name == "paper-plugin.yml" || entry.Name == "velocity-plugin.json" {
 			valid = true
 			break
 		}
 	}
 	if !valid {
-		return nil, fmt.Errorf("JAR is missing its Paper/Bukkit plugin descriptor")
+		return nil, fmt.Errorf("JAR is missing its Paper/Bukkit/Velocity plugin descriptor")
 	}
 	keep = true
 	return temporary, nil

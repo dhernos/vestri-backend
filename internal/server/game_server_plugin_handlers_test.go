@@ -298,6 +298,7 @@ func TestDownloadVerifiedPlugin(t *testing.T) {
 		return buffer.Bytes()
 	}
 	validJAR := makeJAR("plugin.yml")
+	validVelocityJAR := makeJAR("velocity-plugin.json")
 	missingDescriptor := makeJAR("nested/plugin.yml")
 	tests := []struct {
 		name         string
@@ -308,12 +309,13 @@ func TestDownloadVerifiedPlugin(t *testing.T) {
 		wantRequests int
 	}{
 		{name: "valid SHA512 JAR", body: validJAR, checksum: "sha512", wantRequests: 1},
+		{name: "valid Velocity JAR", body: validVelocityJAR, checksum: "sha256", wantRequests: 1},
 		{name: "valid SHA256 JAR", body: validJAR, checksum: "sha256", wantRequests: 1},
 		{name: "valid JAR with both checksums", body: validJAR, checksum: "both", wantRequests: 1},
 		{name: "wrong SHA512", body: validJAR, checksum: "wrong-sha512", wantError: "plugin checksum verification failed", wantRequests: 1},
 		{name: "wrong SHA256 despite valid SHA512", body: validJAR, checksum: "wrong-sha256", wantError: "plugin checksum verification failed", wantRequests: 1},
 		{name: "missing checksum", body: validJAR, wantError: "missing plugin checksum", wantRequests: 1},
-		{name: "missing root descriptor", body: missingDescriptor, checksum: "sha512", wantError: "JAR is missing its Paper/Bukkit plugin descriptor", wantRequests: 1},
+		{name: "missing root descriptor", body: missingDescriptor, checksum: "sha512", wantError: "JAR is missing its Paper/Bukkit/Velocity plugin descriptor", wantRequests: 1},
 		{name: "not a ZIP", body: []byte("not a JAR"), checksum: "sha256", wantError: "download is not a valid plugin JAR", wantRequests: 1},
 		{name: "untrusted host", body: validJAR, checksum: "sha512", downloadURL: "https://example.com/plugin.jar", wantError: "untrusted plugin download URL"},
 		{name: "insecure URL", body: validJAR, checksum: "sha512", downloadURL: "http://cdn.modrinth.com/plugin.jar", wantError: "untrusted plugin download URL"},
@@ -398,7 +400,7 @@ func TestLatestHangarPluginRelease(t *testing.T) {
 			if request.Method != http.MethodGet || request.URL.Path != "/api/v1/projects/martijnpu/PrefiX/versions" || !reflect.DeepEqual(request.URL.Query(), wantQuery) {
 				t.Errorf("unexpected Hangar metadata request: %s %s", request.Method, request.URL)
 			}
-			body = `{"result":[{"name":"7.7","channel":{"name":"Release"},"platformDependencies":{"PAPER":["26.2.1"]},"downloads":{"PAPER":{"fileInfo":null,"externalUrl":"https://cdn.modrinth.com/data/oTIEBNzO/versions/n5Z6ELrs/PrefiX-7.7.jar?mr_download_reason=standalone","downloadUrl":null}}}]}`
+			body = `{"result":[{"name":"7.7","channel":{"name":"Release"},"platformDependencies":{"PAPER":["1.21.1"]},"downloads":{"PAPER":{"fileInfo":null,"externalUrl":"https://cdn.modrinth.com/data/oTIEBNzO/versions/n5Z6ELrs/PrefiX-7.7.jar?mr_download_reason=standalone","downloadUrl":null}}}]}`
 		case request.URL.Host == "api.modrinth.com":
 			if request.Method != http.MethodGet || request.URL.Path != "/v2/version/n5Z6ELrs" {
 				t.Errorf("unexpected Modrinth metadata request: %s %s", request.Method, request.URL)
@@ -413,11 +415,12 @@ func TestLatestHangarPluginRelease(t *testing.T) {
 	release, targetRefs, err := latestPluginRelease(context.Background(), pluginSource{Provider: "hangar", Project: "martijnpu/PrefiX"}, []pluginCompatibilityTarget{
 		{ServerRef: "paper-1", Platform: "PAPER", Version: "26.2"},
 		{ServerRef: "paper-2", Platform: "PAPER", Version: "26.2.2"},
+		{ServerRef: "paper-latest", Platform: "PAPER", Version: "latest"},
 		{ServerRef: "proxy", Platform: "VELOCITY", Version: "3.4.0"},
 	})
 	want := pluginRelease{Version: "7.7", Filename: "PrefiX-7.7.jar", URL: "https://cdn.modrinth.com/data/oTIEBNzO/versions/n5Z6ELrs/PrefiX-7.7.jar", SHA512: "verified-hash"}
-	if err != nil || release != want || !reflect.DeepEqual(targetRefs, []string{"paper-1", "paper-2"}) {
-		t.Fatalf("release = %+v, targetRefs = %v, error = %v; want %+v and both 26.2.x Paper targets", release, targetRefs, err, want)
+	if err != nil || release != want || !reflect.DeepEqual(targetRefs, []string{"paper-1", "paper-2", "paper-latest"}) {
+		t.Fatalf("release = %+v, targetRefs = %v, error = %v; want %+v and all Paper targets", release, targetRefs, err, want)
 	}
 	if requests != 2 {
 		t.Errorf("metadata requests = %d, want 2", requests)
