@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,8 +19,9 @@ import (
 )
 
 type writeGameServerFileRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	Exclusive bool   `json:"exclusive,omitempty"`
 }
 
 type deleteGameServerFileRequest struct {
@@ -202,6 +204,27 @@ func (s *Server) handleWriteGameServerFile(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
+	}
+
+	if req.Exclusive {
+		code, body, listErr := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(path.Dir(fullPath)), nil)
+		if listErr != nil || (code != http.StatusOK && code != http.StatusNotFound) {
+			writeError(w, http.StatusBadGateway, "Failed to check new file path")
+			return
+		}
+		if code == http.StatusOK {
+			var entries []satisfactoryWorkerEntry
+			if json.Unmarshal(body, &entries) != nil {
+				writeError(w, http.StatusBadGateway, "Invalid worker directory response")
+				return
+			}
+			for _, entry := range entries {
+				if entry.Name == path.Base(fullPath) {
+					writeError(w, http.StatusConflict, "A file or folder already exists at this path")
+					return
+				}
+			}
+		}
 	}
 
 	statusCode, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/write", map[string]string{

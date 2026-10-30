@@ -281,6 +281,14 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 
 	req.TemplateID = strings.TrimSpace(req.TemplateID)
 	req.ParentServerRef = strings.TrimSpace(req.ParentServerRef)
+	if req.ParentServerRef != "" {
+		unlock, lockErr := s.lockNodePlugins(r.Context(), node.ID)
+		if lockErr != nil {
+			writeError(w, http.StatusConflict, lockErr.Error())
+			return
+		}
+		defer unlock()
+	}
 	if req.TemplateID == "" {
 		writeError(w, http.StatusBadRequest, "templateId is required")
 		return
@@ -451,7 +459,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		"MINECRAFT_SERVER_JAR_NAME":   minecraftServerJarName,
 		"MINECRAFT_JAVA_ARGS":         defaultMinecraftJavaArgs,
 		"MINECRAFT_SERVER_START_ARGS": minecraftServerStartArgs,
-		"CURSEFORGE_URL":             curseForgeURL,
+		"CURSEFORGE_URL":              curseForgeURL,
 	}
 
 	metadata := gameServerStoredMetadata{
@@ -766,6 +774,19 @@ func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	instances, err := s.Users.ListMinecraftInstances(r.Context(), node.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to resolve dynamic instance ownership")
+		return
+	}
+	for _, instance := range instances {
+		if instance.ServerID == server.ID {
+			chi.RouteContext(r.Context()).URLParams.Add("instanceId", server.ID)
+			s.handleDeleteMinecraftInstance(w, r)
+			return
+		}
+	}
+
 	if isVelocityServer(server) {
 		hasBackends, err := s.velocityServerHasBackends(r.Context(), node.ID, server.ID)
 		if err != nil {
@@ -812,6 +833,12 @@ func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if parentVelocityServer != nil {
+		unlock, lockErr := s.lockNodePlugins(r.Context(), node.ID)
+		if lockErr != nil {
+			writeError(w, http.StatusConflict, lockErr.Error())
+			return
+		}
+		defer unlock()
 		if err := s.unregisterVelocityBackendFromProxy(r.Context(), baseURL, apiKey, parentVelocityServer, server.Slug); err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to update velocity server configuration")
 			return
@@ -911,6 +938,27 @@ func (s *Server) loadNodeAndGameServerForRequest(w http.ResponseWriter, r *http.
 		return nil, nil, nil, "", false
 	}
 
+	if scoped, _ := r.Context().Value(minecraftResourceFilesScopeKey{}).(bool); scoped {
+		if !canManageNodeMinecraftLibrary(node.AccessRole) {
+			writeError(w, http.StatusForbidden, "Node owner or admin permission is required")
+			return nil, nil, nil, "", false
+		}
+		resource, err := s.Users.FindMinecraftResource(r.Context(), node.ID, chi.URLParam(r, "resourceId"))
+		if err != nil || resource == nil {
+			writeError(w, http.StatusNotFound, "Minecraft resource not found")
+			return nil, nil, nil, "", false
+		}
+		return sess, node, &auth.GameServer{RootPath: minecraftResourceDataPath(resource)}, node.AccessRole, true
+	}
+
+	if scoped, _ := r.Context().Value(nodeMinecraftFilesScopeKey{}).(bool); scoped {
+		if !canManageNodeMinecraftLibrary(node.AccessRole) {
+			writeError(w, http.StatusForbidden, "Node owner or admin permission is required to manage shared Minecraft files")
+			return nil, nil, nil, "", false
+		}
+		return sess, node, &auth.GameServer{RootPath: minecraftLibraryPath(node.ID)}, node.AccessRole, true
+	}
+
 	serverRef := strings.TrimSpace(chi.URLParam(r, "serverRef"))
 	if serverRef == "" {
 		writeError(w, http.StatusBadRequest, "serverRef is required")
@@ -932,7 +980,11 @@ func (s *Server) loadNodeAndGameServerForRequest(w http.ResponseWriter, r *http.
 			writeError(w, http.StatusBadRequest, "Plugin staging is only available for velocity servers")
 			return nil, nil, nil, "", false
 		}
-		access.GameServer.RootPath = path.Join(access.GameServer.RootPath, velocityPluginStagingRelativePath)
+		if !canManageNodeMinecraftLibrary(node.AccessRole) {
+			writeError(w, http.StatusForbidden, "Node owner or admin permission is required to manage shared Minecraft files")
+			return nil, nil, nil, "", false
+		}
+		access.GameServer.RootPath = minecraftLibraryPath(node.ID)
 	}
 
 	return sess, node, &access.GameServer, access.AccessRole, true

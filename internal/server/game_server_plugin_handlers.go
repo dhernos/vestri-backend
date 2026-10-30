@@ -66,7 +66,7 @@ func (worker pluginWorker) request(ctx context.Context, endpoint string, payload
 }
 
 func (worker pluginWorker) manifestPath() string {
-	return path.Join(worker.root, velocityPluginStagingRelativePath, "tracked-plugins.json")
+	return path.Join(worker.root, "tracked-plugins.json")
 }
 
 func validPluginFilename(name string) bool {
@@ -127,11 +127,11 @@ func (worker pluginWorker) save(ctx context.Context, manifest pluginManifest) er
 	return worker.request(ctx, "/fs/copy", map[string]string{"source": temporary, "dest": worker.manifestPath()})
 }
 
-func (s *Server) lockPluginGroup(ctx context.Context, serverID string) (func(), error) {
+func (s *Server) lockNodePlugins(ctx context.Context, nodeID string) (func(), error) {
 	if s.Redis == nil {
 		return nil, fmt.Errorf("plugin locking is unavailable")
 	}
-	key, token := "plugins:lock:"+serverID, auth.NewSessionID()
+	key, token := "plugins:node-lock:"+nodeID, auth.NewSessionID()
 	locked, err := s.Redis.SetNX(ctx, key, token, 10*time.Minute).Result()
 	if err != nil {
 		return nil, fmt.Errorf("plugin locking is unavailable")
@@ -247,9 +247,13 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		writeError(w, http.StatusBadRequest, "Plugin staging is only available for Velocity servers")
 		return
 	}
+	if !canManageNodeMinecraftLibrary(node.AccessRole) {
+		writeError(w, http.StatusForbidden, "Node owner or admin permission is required to manage shared Minecraft files")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
-	unlock, err := s.lockPluginGroup(ctx, parent.ID)
+	unlock, err := s.lockNodePlugins(ctx, node.ID)
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -260,7 +264,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
-	worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey, root: parent.RootPath}
+	worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey, root: minecraftLibraryPath(node.ID)}
 	manifest, err := worker.load(ctx)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -419,7 +423,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 	}
 	defer os.Remove(temporary.Name())
 	defer temporary.Close()
-	tempPath := path.Join(parent.RootPath, velocityPluginStagingRelativePath, "downloads", auth.NewSessionID()+".jar")
+	tempPath := path.Join(worker.root, "downloads", auth.NewSessionID()+".jar")
 	if err := worker.upload(ctx, temporary, tempPath); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -444,7 +448,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	staging := path.Join(parent.RootPath, velocityPluginStagingRelativePath, stagingPluginsDirName)
+	staging := minecraftPluginLibraryPath(node.ID)
 	if err := worker.replace(ctx, tempPath, staging, release.Filename, plugin.Filenames); err != nil {
 		writeError(w, http.StatusBadGateway, "Plugin staging failed; retry the update: "+err.Error())
 		return

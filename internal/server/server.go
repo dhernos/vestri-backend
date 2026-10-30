@@ -76,6 +76,13 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(secureHeaders)
 
+	r.Route("/api/minecraft/v1/instances", func(api chi.Router) {
+		api.Use(s.requireMinecraftAPIKey)
+		api.Get("/", s.handleListMinecraftAPIInstances)
+		api.Post("/", s.handleSpawnMinecraftInstance)
+		api.Delete("/{instanceId}", s.handleDeleteMinecraftInstance)
+	})
+
 	r.With(s.requireRoles(accessRoles(http.MethodPost, "/api/register"))).Post("/api/register", s.handleRegister)
 	r.With(s.requireRoles(accessRoles(http.MethodPost, "/api/verify-email"))).Post("/api/verify-email", s.handleVerifyEmail)
 	r.With(s.requireRoles(accessRoles(http.MethodPost, "/api/resend-verification"))).Post("/api/resend-verification", s.handleResendVerification)
@@ -96,6 +103,7 @@ func (s *Server) Router() http.Handler {
 
 	r.Group(func(pr chi.Router) {
 		pr.Use(s.requireSession(true))
+		s.registerMinecraftRoutes(pr)
 
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/auth/me"))).Get("/api/auth/me", s.handleMe)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/sessions"))).Get("/api/sessions", s.handleListSessions)
@@ -129,6 +137,15 @@ func (s *Server) Router() http.Handler {
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/satisfactory-blueprints/upload"))).Post("/api/nodes/{nodeRef}/satisfactory-blueprints/upload", s.handleUploadSatisfactoryBlueprint)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/satisfactory-blueprints/import"))).Post("/api/nodes/{nodeRef}/satisfactory-blueprints/import", s.handleImportSatisfactoryBlueprint)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/satisfactory-blueprints/delete"))).Post("/api/nodes/{nodeRef}/satisfactory-blueprints/delete", s.handleDeleteSatisfactoryBlueprint)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/minecraft/files/list"))).Get("/api/nodes/{nodeRef}/minecraft/files/list", withNodeMinecraftFilesScope(s.handleListGroupFiles))
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/minecraft/files/read"))).Get("/api/nodes/{nodeRef}/minecraft/files/read", withNodeMinecraftFilesScope(s.handleReadGameServerFile))
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/minecraft/files/write"))).Post("/api/nodes/{nodeRef}/minecraft/files/write", withNodeMinecraftFilesScope(s.handleWriteGameServerFile))
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/minecraft/files/delete"))).Post("/api/nodes/{nodeRef}/minecraft/files/delete", withNodeMinecraftFilesScope(s.handleDeleteGameServerFile))
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/minecraft/files/upload"))).Post("/api/nodes/{nodeRef}/minecraft/files/upload", withNodeMinecraftFilesScope(s.handleUploadGameServerFile))
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/minecraft/files/download"))).Get("/api/nodes/{nodeRef}/minecraft/files/download", withNodeMinecraftFilesScope(s.handleDownloadGameServerFile))
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/minecraft/files/transfer"))).Post("/api/nodes/{nodeRef}/minecraft/files/transfer", withNodeMinecraftFilesScope(s.handleTransferGameServerEntry))
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/minecraft/files/unzip"))).Post("/api/nodes/{nodeRef}/minecraft/files/unzip", withNodeMinecraftFilesScope(s.handleUnzipGameServerFile))
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/minecraft/folders/create"))).Post("/api/nodes/{nodeRef}/minecraft/folders/create", withNodeMinecraftFilesScope(s.handleCreateGroupFolder))
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/templates"))).Get("/api/nodes/{nodeRef}/servers/templates", s.handleListGameServerTemplates)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers"))).Get("/api/nodes/{nodeRef}/servers", s.handleListGameServers)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers"))).Post("/api/nodes/{nodeRef}/servers", s.handleCreateGameServer)

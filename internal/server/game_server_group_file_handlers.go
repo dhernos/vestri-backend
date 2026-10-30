@@ -10,15 +10,30 @@ import (
 )
 
 const (
-	velocityPluginStagingRelativePath = "data/vestri-plugin-staging"
-	stagingPluginsDirName             = "plugins"
-	backendPluginsRelativePath        = "data/plugins"
-	maxGroupApplyServers              = 100
-	maxGroupApplyDepth                = 16
-	maxGroupApplyFiles                = 5000
+	stagingPluginsDirName      = "plugins"
+	backendPluginsRelativePath = "data/plugins"
+	maxGroupApplyServers       = 100
+	maxGroupApplyDepth         = 16
+	maxGroupApplyFiles         = 5000
 )
 
 type groupFilesScopeKey struct{}
+type nodeMinecraftFilesScopeKey struct{}
+
+func withNodeMinecraftFilesScope(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), nodeMinecraftFilesScopeKey{}, true)
+		next(w, r.WithContext(context.WithValue(ctx, groupFilesScopeKey{}, true)))
+	}
+}
+
+func minecraftLibraryPath(nodeID string) string {
+	return path.Join(".vestri-minecraft", nodeID)
+}
+
+func minecraftPluginLibraryPath(nodeID string) string {
+	return path.Join(minecraftLibraryPath(nodeID), stagingPluginsDirName)
+}
 
 type applyGroupFilesRequest struct {
 	ServerRefs []string `json:"serverRefs"`
@@ -88,7 +103,8 @@ func (s *Server) handleCreateGroupFolder(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "Invalid folder name")
 		return
 	}
-	parentPath, err := resolveServerScopedPath(server.RootPath, req.Path, false)
+	resourceScoped, _ := r.Context().Value(minecraftResourceFilesScopeKey{}).(bool)
+	parentPath, err := resolveServerScopedPath(server.RootPath, req.Path, resourceScoped)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -129,7 +145,11 @@ func (s *Server) handleApplyGroupFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Plugin staging is only available for velocity servers")
 		return
 	}
-	unlock, err := s.lockPluginGroup(r.Context(), server.ID)
+	if !canManageNodeMinecraftLibrary(node.AccessRole) {
+		writeError(w, http.StatusForbidden, "Node owner or admin permission is required to manage shared Minecraft files")
+		return
+	}
+	unlock, err := s.lockNodePlugins(r.Context(), node.ID)
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -206,8 +226,8 @@ func (s *Server) handleApplyGroupFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stagingPlugins := path.Join(server.RootPath, velocityPluginStagingRelativePath, stagingPluginsDirName)
-	worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey, root: server.RootPath}
+	stagingPlugins := minecraftPluginLibraryPath(node.ID)
+	worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey, root: minecraftLibraryPath(node.ID)}
 	manifest, err := worker.load(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())

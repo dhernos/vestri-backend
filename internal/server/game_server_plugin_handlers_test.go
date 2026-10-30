@@ -19,7 +19,54 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"yourapp/internal/auth"
 )
+
+func TestMinecraftPluginLibraryPath(t *testing.T) {
+	if got := minecraftPluginLibraryPath("node-a"); got != ".vestri-minecraft/node-a/plugins" {
+		t.Fatalf("library path = %q", got)
+	}
+	if minecraftPluginLibraryPath("node-a") == minecraftPluginLibraryPath("node-b") {
+		t.Fatal("different nodes must have isolated plugin libraries")
+	}
+	worker := pluginWorker{root: minecraftLibraryPath("node-a")}
+	if got := worker.manifestPath(); got != ".vestri-minecraft/node-a/tracked-plugins.json" {
+		t.Fatalf("manifest path = %q", got)
+	}
+	if _, err := resolveServerScopedPath(minecraftLibraryPath("node-a"), "../node-b/plugins", false); err == nil {
+		t.Fatal("paths must not escape to another node's library")
+	}
+	if slugify(".vestri-minecraft") == ".vestri-minecraft" {
+		t.Fatal("shared library directory must not be a valid regular server slug")
+	}
+}
+
+func TestMinecraftLibraryPermissions(t *testing.T) {
+	for _, role := range []string{auth.NodeAccessOwner, auth.NodeAccessAdmin, auth.NodeAccessOperator, auth.NodeAccessViewer, ""} {
+		want := role == auth.NodeAccessOwner || role == auth.NodeAccessAdmin
+		if got := canManageNodeMinecraftLibrary(role); got != want {
+			t.Errorf("canManageNodeMinecraftLibrary(%q) = %v, want %v", role, got, want)
+		}
+	}
+}
+
+func TestNodeMinecraftFilesScope(t *testing.T) {
+	handler := withNodeMinecraftFilesScope(func(response http.ResponseWriter, request *http.Request) {
+		if !groupFilesScoped(request.Context()) {
+			t.Error("node library must retain group file protections")
+		}
+		if scoped, _ := request.Context().Value(nodeMinecraftFilesScopeKey{}).(bool); !scoped {
+			t.Error("node library must not require a Velocity server reference")
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+	response := httptest.NewRecorder()
+	handler(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
 
 func TestPluginManifestSaveAtomic(t *testing.T) {
 	type workerRequest struct {

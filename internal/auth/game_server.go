@@ -40,6 +40,14 @@ type CreateGameServerParams struct {
 }
 
 func (r *UserRepository) CreateGameServer(ctx context.Context, params CreateGameServerParams) (*GameServer, error) {
+	return createGameServer(ctx, r.DB, params)
+}
+
+type gameServerInsertStore interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func createGameServer(ctx context.Context, db gameServerInsertStore, params CreateGameServerParams) (*GameServer, error) {
 	id := uuid.NewString()
 
 	templateVersion := params.TemplateVersion
@@ -52,7 +60,7 @@ func (r *UserRepository) CreateGameServer(ctx context.Context, params CreateGame
 		metadata = json.RawMessage("{}")
 	}
 
-	row := r.DB.QueryRow(ctx, `
+	row := db.QueryRow(ctx, `
 		INSERT INTO "GameServer"
 		("id","nodeId","slug","name","templateId","templateVersion","stackName","rootPath","composePath","metadata","createdByUserId")
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)

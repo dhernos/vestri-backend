@@ -10,6 +10,10 @@ func canManageNodeBlueprints(nodeRole string) bool {
 	return nodeRole == auth.NodeAccessOwner || nodeRole == auth.NodeAccessAdmin
 }
 
+func canManageNodeMinecraftLibrary(nodeRole string) bool {
+	return nodeRole == auth.NodeAccessOwner || nodeRole == auth.NodeAccessAdmin
+}
+
 func canUseNodeWorkerProxy(role string) bool {
 	return role == auth.NodeAccessOwner
 }
