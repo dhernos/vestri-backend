@@ -112,6 +112,67 @@ func TestMinecraftResourcePaths(t *testing.T) {
 	}
 }
 
+func TestDeleteMinecraftResourceFiles(t *testing.T) {
+	resource := &auth.MinecraftResource{
+		NodeID: "705d3d41-0233-48c1-9904-b00fbb13389b",
+		ID:     "9350e52f-a91e-427b-8c0c-c7688ffc5c4e",
+		Kind:   "bases",
+	}
+	wantRoot := ".vestri-minecraft/705d3d41-0233-48c1-9904-b00fbb13389b/bases/9350e52f-a91e-427b-8c0c-c7688ffc5c4e"
+	for _, test := range []struct {
+		name         string
+		deleteStatus int
+		listStatus   int
+		wantError    bool
+	}{
+		{"removed entire base", http.StatusOK, http.StatusNotFound, false},
+		{"already absent", http.StatusNotFound, http.StatusNotFound, false},
+		{"empty base remains", http.StatusOK, http.StatusOK, true},
+		{"worker route missing", http.StatusNotFound, http.StatusOK, true},
+		{"verification fails", http.StatusOK, http.StatusInternalServerError, true},
+		{"delete fails", http.StatusInternalServerError, 0, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			deleteCalled, listCalled := false, false
+			workerServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/fs/delete":
+					deleteCalled = true
+					var payload struct {
+						Path      string `json:"path"`
+						Recursive bool   `json:"recursive"`
+					}
+					if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+						t.Error(err)
+					}
+					if request.Method != http.MethodPost || payload.Path != wantRoot || !payload.Recursive {
+						t.Errorf("delete request = %s %+v, want recursive removal of %q", request.Method, payload, wantRoot)
+					}
+					response.WriteHeader(test.deleteStatus)
+				case "/fs/list":
+					listCalled = true
+					if !deleteCalled || request.Method != http.MethodGet || request.URL.Query().Get("path") != wantRoot {
+						t.Errorf("unexpected verification request: %s %s", request.Method, request.URL)
+					}
+					response.WriteHeader(test.listStatus)
+				default:
+					t.Errorf("unexpected worker endpoint %q", request.URL.Path)
+					response.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			defer workerServer.Close()
+			baseURL, _ := url.Parse(workerServer.URL)
+			err := (&Server{}).deleteMinecraftResourceFiles(context.Background(), baseURL, "worker-key", resource)
+			if (err != nil) != test.wantError {
+				t.Fatalf("delete error = %v, want error %v", err, test.wantError)
+			}
+			if !deleteCalled || listCalled != (test.listStatus != 0) {
+				t.Errorf("delete called = %v, list called = %v", deleteCalled, listCalled)
+			}
+		})
+	}
+}
+
 func TestMinecraftDirectoryCopyNeverStartsServer(t *testing.T) {
 	type workerCall struct {
 		Endpoint string
@@ -141,5 +202,41 @@ func TestMinecraftDirectoryCopyNeverStartsServer(t *testing.T) {
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("worker calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestInstallMinecraftSharedPluginReplacesBaseEntry(t *testing.T) {
+	type workerCall struct {
+		Endpoint string
+		Payload  map[string]interface{}
+	}
+	var calls []workerCall
+	workerServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		calls = append(calls, workerCall{Endpoint: request.URL.Path, Payload: payload})
+		response.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(workerServer.Close)
+	baseURL, _ := url.Parse(workerServer.URL)
+	server := &Server{}
+	worker := pluginWorker{server: server, baseURL: baseURL, apiKey: "worker-key"}
+	if err := server.installMinecraftSharedPlugin(context.Background(), worker, "node-a", ".vestri-minecraft/node-a/templates/template-a/data", "LuckPerms"); err != nil {
+		t.Fatal(err)
+	}
+	want := []workerCall{
+		{Endpoint: "/fs/delete", Payload: map[string]interface{}{"path": ".vestri-minecraft/node-a/templates/template-a/data/plugins/LuckPerms", "recursive": true}},
+		{Endpoint: "/fs/mkdir", Payload: map[string]interface{}{"path": ".vestri-minecraft/node-a/templates/template-a/data/plugins", "recursive": true}},
+		{Endpoint: "/fs/transfer", Payload: map[string]interface{}{"source": ".vestri-minecraft/node-a/plugins/LuckPerms", "dest": ".vestri-minecraft/node-a/templates/template-a/data/plugins/LuckPerms", "operation": "copy"}},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("worker calls = %#v, want %#v", calls, want)
+	}
+	if err := server.installMinecraftSharedPlugin(context.Background(), worker, "node-a", ".vestri-minecraft/node-a/templates/template-a/data", "../escape"); err == nil {
+		t.Fatal("accepted an unsafe shared plugin name")
 	}
 }

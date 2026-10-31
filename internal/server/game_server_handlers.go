@@ -366,6 +366,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var parentServer *auth.GameServer
+	backendWhitelistEnabled := false
 	if req.ParentServerRef != "" {
 		parentAccess, findErr := s.Users.FindAccessibleGameServerByRefForNode(r.Context(), sess.UserID, node, req.ParentServerRef)
 		if findErr != nil {
@@ -385,6 +386,12 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		parentServer = &parentAccess.GameServer
+		hasBackends, backendsErr := s.velocityServerHasBackends(r.Context(), node.ID, parentServer.ID)
+		if backendsErr != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to check existing velocity backends")
+			return
+		}
+		backendWhitelistEnabled = velocityBackendWhitelistEnabled(hasBackends)
 	}
 
 	requestedName := strings.TrimSpace(req.Name)
@@ -588,6 +595,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			rootPath,
 			softwareVersion,
 			forwardingSecret,
+			backendWhitelistEnabled,
 		); applyErr != nil {
 			writeError(w, http.StatusBadGateway, "Failed to configure backend server for velocity")
 			return
@@ -1761,6 +1769,10 @@ func (s *Server) velocityServerHasBackends(ctx context.Context, nodeID, parentSe
 	return false, nil
 }
 
+func velocityBackendWhitelistEnabled(hasBackends bool) bool {
+	return !hasBackends
+}
+
 func generateForwardingSecret() (string, error) {
 	secretBytes := make([]byte, 32)
 	if _, err := rand.Read(secretBytes); err != nil {
@@ -2384,6 +2396,7 @@ func (s *Server) applyVelocityBackendProxySettings(
 	ctx context.Context,
 	baseURL *url.URL,
 	apiKey, rootPath, softwareVersion, forwardingSecret string,
+	whitelistEnabled bool,
 ) error {
 	backendPropertiesPath := path.Join(rootPath, backendServerPropertiesRelative)
 	propertiesContent, _, err := s.workerReadFileOptional(ctx, baseURL, apiKey, backendPropertiesPath)
@@ -2391,6 +2404,7 @@ func (s *Server) applyVelocityBackendProxySettings(
 		return err
 	}
 	propertiesContent = upsertJavaPropertiesValue(propertiesContent, "online-mode", "false")
+	propertiesContent = upsertJavaPropertiesValue(propertiesContent, "white-list", strconv.FormatBool(whitelistEnabled))
 	if err := s.workerWriteFile(ctx, baseURL, apiKey, backendPropertiesPath, propertiesContent); err != nil {
 		return err
 	}

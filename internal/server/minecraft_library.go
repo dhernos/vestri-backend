@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ type minecraftResourceSpec struct {
 	BaseID           string   `json:"baseId,omitempty"`
 	WorldID          string   `json:"worldId,omitempty"`
 	PluginIDs        []string `json:"pluginIds,omitempty"`
+	SharedPlugins    []string `json:"sharedPlugins,omitempty"`
 	ParentID         string   `json:"parentId,omitempty"`
 	MaxInstances     int      `json:"maxInstances,omitempty"`
 }
@@ -35,6 +37,21 @@ func minecraftResourcePath(resource *auth.MinecraftResource) string {
 
 func minecraftResourceDataPath(resource *auth.MinecraftResource) string {
 	return path.Join(minecraftResourcePath(resource), "data")
+}
+
+func (s *Server) deleteMinecraftResourceFiles(ctx context.Context, baseURL *url.URL, apiKey string, resource *auth.MinecraftResource) error {
+	root := minecraftResourcePath(resource)
+	if err := s.workerDeletePath(ctx, baseURL, apiKey, root, true); err != nil {
+		return err
+	}
+	statusCode, body, err := s.callWorkerJSON(ctx, baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(root), nil)
+	if err != nil {
+		return err
+	}
+	if statusCode != http.StatusNotFound {
+		return fmt.Errorf("resource directory still exists or could not be checked (%d): %s", statusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func validMinecraftResourceKind(kind string) bool {
@@ -61,7 +78,7 @@ func (s *Server) withMinecraftResourceFiles(next http.HandlerFunc) http.HandlerF
 		if !ok {
 			return
 		}
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet || strings.HasSuffix(r.URL.Path, "/files/download") {
 			unlock, err := s.lockNodePlugins(ctx, node.ID)
 			if err != nil {
 				writeError(w, http.StatusConflict, err.Error())
@@ -117,6 +134,18 @@ func (s *Server) copyMinecraftDirectory(ctx context.Context, worker pluginWorker
 	return worker.request(ctx, "/fs/transfer", map[string]string{"source": source, "dest": dest, "operation": "copy"})
 }
 
+func (s *Server) installMinecraftSharedPlugin(ctx context.Context, worker pluginWorker, nodeID, dataPath, name string) error {
+	if !safeSatisfactoryDirectoryName(name) {
+		return fmt.Errorf("invalid shared plugin name")
+	}
+	source := path.Join(minecraftPluginLibraryPath(nodeID), name)
+	dest := path.Join(dataPath, "plugins", name)
+	if err := s.workerDeletePath(ctx, worker.baseURL, worker.apiKey, dest, true); err != nil {
+		return err
+	}
+	return s.copyMinecraftDirectory(ctx, worker, source, dest)
+}
+
 func (s *Server) overlayMinecraftPlugins(ctx context.Context, worker pluginWorker, source, dest string) error {
 	var files []string
 	if err := s.collectWorkerFiles(ctx, worker.baseURL, worker.apiKey, source, "", 0, &files); err != nil {
@@ -153,7 +182,7 @@ func (s *Server) handleCreateMinecraftResource(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "A resource kind and name (1-64 characters) are required")
 		return
 	}
-	if len(request.Spec.MandatoryPlugins) > 100 || len(request.Spec.PluginIDs) > 100 {
+	if len(request.Spec.MandatoryPlugins) > 100 || len(request.Spec.PluginIDs) > 100 || len(request.Spec.SharedPlugins) > 100 {
 		writeError(w, http.StatusBadRequest, "Too many plugins")
 		return
 	}
@@ -313,6 +342,18 @@ func (s *Server) handleCreateMinecraftResource(w http.ResponseWriter, r *http.Re
 				return
 			}
 		}
+		sharedSeen := map[string]bool{}
+		for _, name := range spec.SharedPlugins {
+			if sharedSeen[name] {
+				writeError(w, http.StatusBadRequest, "Duplicate shared plugin")
+				return
+			}
+			sharedSeen[name] = true
+			if err = s.installMinecraftSharedPlugin(ctx, worker, node.ID, data, name); err != nil {
+				writeError(w, http.StatusBadGateway, "Failed to copy selected shared plugin")
+				return
+			}
+		}
 		seen := map[string]bool{}
 		for _, id := range spec.PluginIDs {
 			if seen[id] {
@@ -387,7 +428,7 @@ func (s *Server) handleDeleteMinecraftResource(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadGateway, "Invalid worker configuration")
 		return
 	}
-	if err = s.workerDeletePath(r.Context(), baseURL, apiKey, minecraftResourcePath(resource), true); err != nil {
+	if err = s.deleteMinecraftResourceFiles(r.Context(), baseURL, apiKey, resource); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to delete resource files")
 		return
 	}

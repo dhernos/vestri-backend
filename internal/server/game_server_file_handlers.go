@@ -358,35 +358,37 @@ func (s *Server) handleDownloadGameServerFile(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	query := url.Values{"path": {fullPath}}.Encode()
-	resp, err := s.callWorkerStream(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/download", query, "", nil)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Worker request failed")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		copyHeaders(w.Header(), resp.Header, []string{
-			"Content-Type",
-			"Content-Encoding",
-			"Content-Disposition",
-			"Content-Length",
-			"Content-Range",
-			"Accept-Ranges",
-		})
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-		return
-	}
-
-	workerErr := readWorkerErrorText(resp.Body)
-	if !isDirectoryDownloadError(resp.StatusCode, workerErr) {
-		if workerErr == "" {
-			workerErr = "Worker request failed"
+	if r.URL.Query().Get("archive") != "zip" {
+		query := url.Values{"path": {fullPath}}.Encode()
+		resp, err := s.callWorkerStream(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/download", query, "", nil)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "Worker request failed")
+			return
 		}
-		http.Error(w, workerErr, resp.StatusCode)
-		return
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			copyHeaders(w.Header(), resp.Header, []string{
+				"Content-Type",
+				"Content-Encoding",
+				"Content-Disposition",
+				"Content-Length",
+				"Content-Range",
+				"Accept-Ranges",
+			})
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+			return
+		}
+
+		workerErr := readWorkerErrorText(resp.Body)
+		if !isDirectoryDownloadError(resp.StatusCode, workerErr) {
+			if workerErr == "" {
+				workerErr = "Worker request failed"
+			}
+			http.Error(w, workerErr, resp.StatusCode)
+			return
+		}
 	}
 
 	sourceName := path.Base(fullPath)

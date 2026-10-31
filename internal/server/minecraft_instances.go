@@ -224,6 +224,12 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusConflict, "The template requires an existing Velocity proxy")
 		return
 	}
+	hasBackends, err := s.velocityServerHasBackends(ctx, node.ID, parent.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to check existing velocity backends")
+		return
+	}
+	whitelistEnabled := velocityBackendWhitelistEnabled(hasBackends)
 	parentMetadata := parseGameServerMetadata(parent.Metadata)
 	if err = s.syncMinecraftProxy(ctx, pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, node.ID, parent, ""); err != nil {
 		writeError(w, http.StatusBadGateway, "Velocity bridge is unavailable; install Vestri Dynamic Servers and start the proxy")
@@ -313,7 +319,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Failed to preserve Velocity fallback targets")
 		return
 	}
-	if err = s.applyVelocityBackendProxySettings(ctx, baseURL, apiKey, slug, spec.Software, secret); err != nil {
+	if err = s.applyVelocityBackendProxySettings(ctx, baseURL, apiKey, slug, spec.Software, secret, whitelistEnabled); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to configure Velocity forwarding")
 		return
 	}
