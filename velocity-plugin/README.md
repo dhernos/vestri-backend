@@ -146,7 +146,7 @@ proxy. On each allowed backend, put the same secret in the generated
 `plugins/VestriConsoleBridge/config.yml`:
 
 ```yaml
-bridge-secret: '<same 64-character hexadecimal bridge secret>'
+bridge-secret: "<same 64-character hexadecimal bridge secret>"
 ```
 
 The bridge secret is separate from the `vmc_` template API keys. Never distribute
