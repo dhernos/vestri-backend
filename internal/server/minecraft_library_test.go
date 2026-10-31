@@ -205,13 +205,21 @@ func TestMinecraftDirectoryCopyNeverStartsServer(t *testing.T) {
 	}
 }
 
-func TestInstallMinecraftSharedPluginReplacesBaseEntry(t *testing.T) {
+func TestImportMinecraftSharedPlugins(t *testing.T) {
 	type workerCall struct {
 		Endpoint string
 		Payload  map[string]interface{}
 	}
 	var calls []workerCall
 	workerServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/fs/list" {
+			if request.Method != http.MethodGet || request.URL.Query().Get("path") != ".vestri-minecraft/node-a/plugins" {
+				t.Errorf("unexpected library list request: %s %s", request.Method, request.URL)
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`[{"name":"LuckPerms","type":"dir"},{"name":"Example.jar","type":"file"}]`))
+			return
+		}
 		var payload map[string]interface{}
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Error(err)
@@ -225,18 +233,24 @@ func TestInstallMinecraftSharedPluginReplacesBaseEntry(t *testing.T) {
 	baseURL, _ := url.Parse(workerServer.URL)
 	server := &Server{}
 	worker := pluginWorker{server: server, baseURL: baseURL, apiKey: "worker-key"}
-	if err := server.installMinecraftSharedPlugin(context.Background(), worker, "node-a", ".vestri-minecraft/node-a/templates/template-a/data", "LuckPerms"); err != nil {
+	pack := &auth.MinecraftResource{ID: "pack-a", NodeID: "node-a", Kind: "plugin-packs"}
+	if err := server.importMinecraftSharedPlugins(context.Background(), worker, "node-a", pack, []string{"LuckPerms", "Example.jar"}); err != nil {
 		t.Fatal(err)
 	}
 	want := []workerCall{
-		{Endpoint: "/fs/delete", Payload: map[string]interface{}{"path": ".vestri-minecraft/node-a/templates/template-a/data/plugins/LuckPerms", "recursive": true}},
-		{Endpoint: "/fs/mkdir", Payload: map[string]interface{}{"path": ".vestri-minecraft/node-a/templates/template-a/data/plugins", "recursive": true}},
-		{Endpoint: "/fs/transfer", Payload: map[string]interface{}{"source": ".vestri-minecraft/node-a/plugins/LuckPerms", "dest": ".vestri-minecraft/node-a/templates/template-a/data/plugins/LuckPerms", "operation": "copy"}},
+		{Endpoint: "/fs/delete", Payload: map[string]interface{}{"path": ".vestri-minecraft/node-a/plugin-packs/pack-a/data/LuckPerms", "recursive": true}},
+		{Endpoint: "/fs/transfer", Payload: map[string]interface{}{"source": ".vestri-minecraft/node-a/plugins/LuckPerms", "dest": ".vestri-minecraft/node-a/plugin-packs/pack-a/data/LuckPerms", "operation": "copy"}},
+		{Endpoint: "/fs/delete", Payload: map[string]interface{}{"path": ".vestri-minecraft/node-a/plugin-packs/pack-a/data/Example.jar", "recursive": true}},
+		{Endpoint: "/fs/transfer", Payload: map[string]interface{}{"source": ".vestri-minecraft/node-a/plugins/Example.jar", "dest": ".vestri-minecraft/node-a/plugin-packs/pack-a/data/Example.jar", "operation": "copy"}},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("worker calls = %#v, want %#v", calls, want)
 	}
-	if err := server.installMinecraftSharedPlugin(context.Background(), worker, "node-a", ".vestri-minecraft/node-a/templates/template-a/data", "../escape"); err == nil {
-		t.Fatal("accepted an unsafe shared plugin name")
+	calls = nil
+	if err := server.importMinecraftSharedPlugins(context.Background(), worker, "node-a", pack, []string{"../outside"}); err == nil {
+		t.Fatal("accepted unsafe shared plugin name")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("unsafe plugin caused mutations: %#v", calls)
 	}
 }

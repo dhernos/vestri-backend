@@ -513,6 +513,7 @@ func (s *Server) registerMinecraftRoutes(r chi.Router) {
 		root := "/api/nodes/{nodeRef}/minecraft"
 		routes.Get(root, s.handleMinecraftLibrary)
 		routes.Post(root+"/resources", s.handleCreateMinecraftResource)
+		routes.Post(root+"/resources/{resourceId}/shared-plugins", s.handleImportMinecraftSharedPlugins)
 		routes.Delete(root+"/resources/{resourceId}", s.handleDeleteMinecraftResource)
 		routes.Post(root+"/keys", s.handleCreateMinecraftAPIKey)
 		routes.Delete(root+"/keys/{keyId}", s.handleRevokeMinecraftAPIKey)

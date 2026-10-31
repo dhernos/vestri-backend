@@ -69,6 +69,7 @@ var endpointAccess = []AccessRule{
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/minecraft/files/download", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/files/transfer", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/files/unzip", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/resources/{resourceId}/shared-plugins", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/folders/create", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/templates", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},

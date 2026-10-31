@@ -24,7 +24,6 @@ type minecraftResourceSpec struct {
 	BaseID           string   `json:"baseId,omitempty"`
 	WorldID          string   `json:"worldId,omitempty"`
 	PluginIDs        []string `json:"pluginIds,omitempty"`
-	SharedPlugins    []string `json:"sharedPlugins,omitempty"`
 	ParentID         string   `json:"parentId,omitempty"`
 	MaxInstances     int      `json:"maxInstances,omitempty"`
 }
@@ -134,16 +133,77 @@ func (s *Server) copyMinecraftDirectory(ctx context.Context, worker pluginWorker
 	return worker.request(ctx, "/fs/transfer", map[string]string{"source": source, "dest": dest, "operation": "copy"})
 }
 
-func (s *Server) installMinecraftSharedPlugin(ctx context.Context, worker pluginWorker, nodeID, dataPath, name string) error {
-	if !safeSatisfactoryDirectoryName(name) {
-		return fmt.Errorf("invalid shared plugin name")
+func (s *Server) importMinecraftSharedPlugins(ctx context.Context, worker pluginWorker, nodeID string, pack *auth.MinecraftResource, names []string) error {
+	if pack.Kind != "plugin-packs" || len(names) == 0 || len(names) > 100 {
+		return fmt.Errorf("invalid plugin pack or shared plugin selection")
 	}
-	source := path.Join(minecraftPluginLibraryPath(nodeID), name)
-	dest := path.Join(dataPath, "plugins", name)
-	if err := s.workerDeletePath(ctx, worker.baseURL, worker.apiKey, dest, true); err != nil {
+	entries, err := s.listSatisfactoryWorkerEntries(ctx, worker.baseURL, worker.apiKey, minecraftPluginLibraryPath(nodeID))
+	if err != nil {
 		return err
 	}
-	return s.copyMinecraftDirectory(ctx, worker, source, dest)
+	available := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if (entry.Type == "file" || entry.Type == "dir") && safeSatisfactoryDirectoryName(entry.Name) {
+			available[entry.Name] = true
+		}
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if !safeSatisfactoryDirectoryName(name) || !available[name] || seen[name] {
+			return fmt.Errorf("invalid or unavailable shared plugin %q", name)
+		}
+		seen[name] = true
+	}
+	for _, name := range names {
+		dest := path.Join(minecraftResourceDataPath(pack), name)
+		if err = s.workerDeletePath(ctx, worker.baseURL, worker.apiKey, dest, true); err != nil {
+			return err
+		}
+		if err = worker.request(ctx, "/fs/transfer", map[string]string{
+			"source":    path.Join(minecraftPluginLibraryPath(nodeID), name),
+			"dest":      dest,
+			"operation": "copy",
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) handleImportMinecraftSharedPlugins(w http.ResponseWriter, r *http.Request) {
+	_, node, ok := s.loadMinecraftAdmin(w, r)
+	if !ok {
+		return
+	}
+	unlock, err := s.lockNodePlugins(r.Context(), node.ID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	defer unlock()
+	resource, err := s.minecraftResource(r.Context(), node.ID, chi.URLParam(r, "resourceId"), "plugin-packs")
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Plugin pack not found")
+		return
+	}
+	var request struct {
+		Names []string `json:"names"`
+	}
+	if err = decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	baseURL, apiKey, err := s.workerTargetFromNode(node)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Invalid worker configuration")
+		return
+	}
+	worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}
+	if err = s.importMinecraftSharedPlugins(r.Context(), worker, node.ID, resource, request.Names); err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to import shared plugins")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) overlayMinecraftPlugins(ctx context.Context, worker pluginWorker, source, dest string) error {
@@ -182,7 +242,7 @@ func (s *Server) handleCreateMinecraftResource(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "A resource kind and name (1-64 characters) are required")
 		return
 	}
-	if len(request.Spec.MandatoryPlugins) > 100 || len(request.Spec.PluginIDs) > 100 || len(request.Spec.SharedPlugins) > 100 {
+	if len(request.Spec.MandatoryPlugins) > 100 || len(request.Spec.PluginIDs) > 100 {
 		writeError(w, http.StatusBadRequest, "Too many plugins")
 		return
 	}
@@ -339,18 +399,6 @@ func (s *Server) handleCreateMinecraftResource(w http.ResponseWriter, r *http.Re
 			}
 			if err = s.copyMinecraftDirectory(ctx, worker, minecraftResourceDataPath(world), path.Join(data, "world")); err != nil {
 				writeError(w, http.StatusBadGateway, "Failed to copy world")
-				return
-			}
-		}
-		sharedSeen := map[string]bool{}
-		for _, name := range spec.SharedPlugins {
-			if sharedSeen[name] {
-				writeError(w, http.StatusBadRequest, "Duplicate shared plugin")
-				return
-			}
-			sharedSeen[name] = true
-			if err = s.installMinecraftSharedPlugin(ctx, worker, node.ID, data, name); err != nil {
-				writeError(w, http.StatusBadGateway, "Failed to copy selected shared plugin")
 				return
 			}
 		}
