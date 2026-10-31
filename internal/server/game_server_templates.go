@@ -67,16 +67,17 @@ type gameServerTemplateVersionField struct {
 }
 
 type gameServerStoredMetadata struct {
-	TemplateName    string                         `json:"templateName"`
-	Game            string                         `json:"game"`
-	ConfigFiles     []gameServerTemplateConfigFile `json:"configFiles"`
-	SoftwareVersion string                         `json:"softwareVersion,omitempty"`
-	GameVersion     string                         `json:"gameVersion,omitempty"`
-	Kind            string                         `json:"kind,omitempty"`
-	ParentServerID  string                         `json:"parentServerId,omitempty"`
-	VelocityNetwork string                         `json:"velocityNetwork,omitempty"`
-	ConnectHost     string                         `json:"connectHost,omitempty"`
-	ConnectPort     int                            `json:"connectPort,omitempty"`
+	TemplateName       string                         `json:"templateName"`
+	Game               string                         `json:"game"`
+	ConfigFiles        []gameServerTemplateConfigFile `json:"configFiles"`
+	SoftwareVersion    string                         `json:"softwareVersion,omitempty"`
+	GameVersion        string                         `json:"gameVersion,omitempty"`
+	Kind               string                         `json:"kind,omitempty"`
+	ParentServerID     string                         `json:"parentServerId,omitempty"`
+	VelocityNetwork    string                         `json:"velocityNetwork,omitempty"`
+	VelocityServerName string                         `json:"velocityServerName,omitempty"`
+	ConnectHost        string                         `json:"connectHost,omitempty"`
+	ConnectPort        int                            `json:"connectPort,omitempty"`
 }
 
 var (

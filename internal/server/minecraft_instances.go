@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -240,6 +241,12 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		network = velocityNetworkName(parent.Slug)
 	}
 	slug := "mcgame-" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	nodeServers, err := s.Users.ListGameServersForNode(ctx, node.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to allocate instance name")
+		return
+	}
+	instanceName := nextMinecraftInstanceName(template.Name, nodeServers, parent.ID)
 	worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}
 	committed := false
 	registered := false
@@ -251,7 +258,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 		if registered {
-			_ = s.unregisterVelocityBackendFromProxy(cleanupCtx, baseURL, apiKey, parent, slug)
+			_ = s.unregisterVelocityBackendFromProxy(cleanupCtx, baseURL, apiKey, parent, instanceName)
 		}
 		_ = s.workerDeletePath(cleanupCtx, baseURL, apiKey, slug, true)
 		if created != nil {
@@ -303,7 +310,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Failed to write instance configuration")
 		return
 	}
-	secret, err := s.registerVelocityBackendAndResolveForwardingSecret(ctx, baseURL, apiKey, parent, slug, velocityBackendHostForSlug(slug), defaultMinecraftPort)
+	secret, err := s.registerVelocityBackendAndResolveForwardingSecret(ctx, baseURL, apiKey, parent, instanceName, velocityBackendHostForSlug(slug), defaultMinecraftPort)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to register instance with Velocity")
 		return
@@ -315,7 +322,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Failed to read proxy configuration")
 		return
 	}
-	if err = s.workerWriteFile(ctx, baseURL, apiKey, proxyConfigPath, removeVelocityTomlTryServer(proxyConfig, slug)); err != nil {
+	if err = s.workerWriteFile(ctx, baseURL, apiKey, proxyConfigPath, removeVelocityTomlTryServer(proxyConfig, instanceName)); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to preserve Velocity fallback targets")
 		return
 	}
@@ -323,9 +330,9 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Failed to configure Velocity forwarding")
 		return
 	}
-	metadata := gameServerStoredMetadata{TemplateName: template.Name, Game: "minecraft", SoftwareVersion: spec.Software, GameVersion: spec.Version, Kind: gameServerKindVelocityBackend, ParentServerID: parent.ID, VelocityNetwork: network, ConnectHost: velocityBackendHostForSlug(slug), ConnectPort: defaultMinecraftPort, ConfigFiles: vanilla.ConfigFiles}
+	metadata := gameServerStoredMetadata{TemplateName: template.Name, Game: "minecraft", SoftwareVersion: spec.Software, GameVersion: spec.Version, Kind: gameServerKindVelocityBackend, ParentServerID: parent.ID, VelocityNetwork: network, VelocityServerName: instanceName, ConnectHost: velocityBackendHostForSlug(slug), ConnectPort: defaultMinecraftPort, ConfigFiles: vanilla.ConfigFiles}
 	metadataRaw, _ := json.Marshal(metadata)
-	created, err = s.Users.CreateMinecraftGameInstance(ctx, auth.CreateGameServerParams{NodeID: node.ID, Slug: slug, Name: template.Name + " " + slug[7:15], TemplateID: vanillaTemplateID, StackName: slug, RootPath: slug, ComposePath: path.Join(slug, "docker-compose.yml"), Metadata: metadataRaw, CreatedByUserID: userID}, auth.MinecraftInstance{TemplateID: template.ID, KeyID: keyID, RequestID: requestID})
+	created, err = s.Users.CreateMinecraftGameInstance(ctx, auth.CreateGameServerParams{NodeID: node.ID, Slug: slug, Name: instanceName, TemplateID: vanillaTemplateID, StackName: slug, RootPath: slug, ComposePath: path.Join(slug, "docker-compose.yml"), Metadata: metadataRaw, CreatedByUserID: userID}, auth.MinecraftInstance{TemplateID: template.ID, KeyID: keyID, RequestID: requestID})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to save instance")
 		return
@@ -378,7 +385,7 @@ func (s *Server) syncMinecraftProxy(ctx context.Context, worker pluginWorker, no
 		if metadata.ParentServerID != parent.ID {
 			continue
 		}
-		targets[server.Slug] = map[string]interface{}{"host": metadata.ConnectHost, "port": metadata.ConnectPort}
+		targets[server.Slug] = map[string]interface{}{"name": minecraftInstanceProxyName(&server), "host": metadata.ConnectHost, "port": metadata.ConnectPort}
 	}
 	manifest, err := json.Marshal(map[string]interface{}{"servers": targets})
 	if err != nil {
@@ -393,6 +400,41 @@ func (s *Server) syncMinecraftProxy(ctx context.Context, worker pluginWorker, no
 func minecraftInstanceResponse(server *auth.GameServer) map[string]interface{} {
 	metadata := parseGameServerMetadata(server.Metadata)
 	return map[string]interface{}{"serverId": server.ID, "name": server.Name, "slug": server.Slug, "host": metadata.ConnectHost, "port": metadata.ConnectPort, "parentId": metadata.ParentServerID, "state": "starting"}
+}
+
+var minecraftFriendlyName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}-[1-9][0-9]*$`)
+var minecraftNameCharacters = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+
+func nextMinecraftInstanceName(template string, servers []auth.GameServer, parentID string) string {
+	prefix := strings.Trim(minecraftNameCharacters.ReplaceAllString(template, ""), "-_")
+	if prefix == "" {
+		prefix = "Minecraft"
+	}
+	if len(prefix) > 64 {
+		prefix = prefix[:64]
+	}
+	used := map[string]bool{}
+	for _, server := range servers {
+		if parseGameServerMetadata(server.Metadata).ParentServerID == parentID {
+			used[strings.ToLower(server.Name)] = true
+			used[strings.ToLower(server.Slug)] = true
+			used[strings.ToLower(minecraftInstanceProxyName(&server))] = true
+		}
+	}
+	for number := 1; ; number++ {
+		candidate := fmt.Sprintf("%s-%d", prefix, number)
+		if !used[strings.ToLower(candidate)] {
+			return candidate
+		}
+	}
+}
+
+func minecraftInstanceProxyName(server *auth.GameServer) string {
+	name := parseGameServerMetadata(server.Metadata).VelocityServerName
+	if minecraftFriendlyName.MatchString(name) {
+		return name
+	}
+	return server.Slug
 }
 
 func minecraftInstanceProperties(properties string, randomWorld bool) string {
@@ -470,7 +512,7 @@ func (s *Server) handleDeleteMinecraftInstance(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if parent != nil {
-		if err = s.unregisterVelocityBackendFromProxy(ctx, baseURL, apiKey, parent, server.Slug); err != nil {
+		if err = s.unregisterVelocityBackendFromProxy(ctx, baseURL, apiKey, parent, minecraftInstanceProxyName(server)); err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to unregister instance")
 			return
 		}

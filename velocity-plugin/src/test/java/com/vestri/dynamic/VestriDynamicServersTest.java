@@ -25,6 +25,36 @@ class VestriDynamicServersTest {
     Path directory;
 
     @Test
+    void registersFriendlyNamesAndRemovesStaleFriendlyTargets() throws Exception {
+        String id = "mcgame-" + "b".repeat(32);
+        ProxyServer proxy = mock(ProxyServer.class);
+        ServerInfo stale = new ServerInfo("BedWars-1", InetSocketAddress.createUnresolved("vestri-mcgame-" + "a".repeat(32), 25565));
+        RegisteredServer registered = mock(RegisteredServer.class);
+        when(registered.getServerInfo()).thenReturn(stale);
+        when(proxy.getAllServers()).thenReturn(List.of(registered));
+        when(proxy.getServer("BedWars-2")).thenReturn(Optional.empty());
+        Path manifest = directory.resolve("friendly.json");
+        Files.writeString(manifest, "{\"servers\":{\"" + id + "\":{\"name\":\"BedWars-2\",\"host\":\"vestri-" + id + "\",\"port\":25565}}}");
+        new VestriDynamicServers(proxy, mock(Logger.class)).synchronizeServers(manifest);
+        verify(proxy).unregisterServer(stale);
+        verify(proxy).registerServer(new ServerInfo("BedWars-2", InetSocketAddress.createUnresolved("vestri-" + id, 25565)));
+    }
+
+    @Test
+    void refusesFriendlyNameCollisionsBeforeMutatingRegistry() throws Exception {
+        String id = "mcgame-" + "b".repeat(32);
+        ProxyServer proxy = mock(ProxyServer.class);
+        RegisteredServer ordinary = mock(RegisteredServer.class);
+        when(ordinary.getServerInfo()).thenReturn(new ServerInfo("BedWars-1", new InetSocketAddress("127.0.0.1", 25565)));
+        when(proxy.getServer("BedWars-1")).thenReturn(Optional.of(ordinary));
+        Path manifest = directory.resolve("conflict.json");
+        Files.writeString(manifest, "{\"servers\":{\"" + id + "\":{\"name\":\"BedWars-1\",\"host\":\"vestri-" + id + "\",\"port\":25565}}}");
+        assertThrows(IOException.class, () -> new VestriDynamicServers(proxy, mock(Logger.class)).synchronizeServers(manifest));
+        verify(proxy, never()).registerServer(any());
+        verify(proxy, never()).unregisterServer(any());
+    }
+
+    @Test
     void registersNewGamesAndRemovesOnlyStaleDynamicServers() throws Exception {
         String oldName = "mcgame-" + "a".repeat(32);
         String newName = "mcgame-" + "b".repeat(32);
