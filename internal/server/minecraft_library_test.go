@@ -73,6 +73,17 @@ func TestMinecraftKeyInstanceOwnership(t *testing.T) {
 	}
 }
 
+func TestMinecraftPowerRejectsMissingKey(t *testing.T) {
+	for _, action := range []string{"start", "stop"} {
+		response := httptest.NewRecorder()
+		(&Server{}).Router().ServeHTTP(response, httptest.NewRequest(http.MethodPost,
+			"/api/minecraft/v1/instances/some-server/"+action, nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d, want 401", action, response.Code)
+		}
+	}
+}
+
 func TestMinecraftInstanceWorldProperties(t *testing.T) {
 	original := "level-name=old-map\nlevel-seed=12345\nserver-port=25570\nmax-players=16\n"
 	for _, random := range []bool{false, true} {

@@ -1,7 +1,9 @@
 package com.vestri.dynamic.bukkit;
 
 import com.vestri.dynamic.ConsoleBridgeProtocol;
+import com.vestri.dynamic.LifecycleSuggestions;
 import java.io.IOException;
+import java.util.List;
 import java.util.UUID;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -13,6 +15,15 @@ public final class VestriConsoleBridge extends JavaPlugin {
     public void onEnable() {
         saveDefaultConfig();
         getServer().getMessenger().registerOutgoingPluginChannel(this, ConsoleBridgeProtocol.CHANNEL);
+    }
+
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] arguments) {
+        if (!(sender instanceof ConsoleCommandSender)) {
+            return List.of();
+        }
+        reloadConfig();
+        return LifecycleSuggestions.complete(arguments, getConfig().getStringList("template-names"), false);
     }
 
     @Override
@@ -31,7 +42,7 @@ public final class VestriConsoleBridge extends JavaPlugin {
             String forwarded = ConsoleBridgeProtocol.prepareCommand("vestridynamic " + String.join(" ", arguments));
             byte[] message = ConsoleBridgeProtocol.encode(getConfig().getString("bridge-secret", ""),
                     forwarded, System.currentTimeMillis(), UUID.randomUUID());
-                sender.sendMessage("Forwarding: " + forwarded);
+            sender.sendMessage("Forwarding: " + forwarded);
             carrier.get().sendPluginMessage(this, ConsoleBridgeProtocol.CHANNEL, message);
             sender.sendMessage("Vestri command sent to Velocity; results appear in the proxy console.");
         } catch (IOException | IllegalArgumentException failure) {

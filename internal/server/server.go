@@ -81,6 +81,8 @@ func (s *Server) Router() http.Handler {
 		api.Get("/", s.handleListMinecraftAPIInstances)
 		api.Post("/", s.handleSpawnMinecraftInstance)
 		api.Delete("/{instanceId}", s.handleDeleteMinecraftInstance)
+		api.Post("/{instanceId}/start", s.handleStartMinecraftInstance)
+		api.Post("/{instanceId}/stop", s.handleStopMinecraftInstance)
 	})
 
 	r.With(s.requireRoles(accessRoles(http.MethodPost, "/api/register"))).Post("/api/register", s.handleRegister)

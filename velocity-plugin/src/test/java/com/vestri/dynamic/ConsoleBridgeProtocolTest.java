@@ -20,6 +20,18 @@ class ConsoleBridgeProtocolTest {
     }
 
     @Test
+    void authenticatesPlayerTargetAndPreservesItInRetryCommand() throws Exception {
+        String command = ConsoleBridgeProtocol.prepareCommand("vestridynamic spawn Bed Wars --send-player Luis");
+        assertEquals(command, ConsoleBridgeProtocol.prepareCommand(command));
+        var parsed = LifecycleRequest.parse(command.substring("vestridynamic ".length()).split("\\s+"));
+        assertEquals("Luis", parsed.sendPlayer());
+        byte[] payload = ConsoleBridgeProtocol.encode(secret, command, now, UUID.randomUUID());
+        assertEquals(command, new ConsoleBridgeProtocol().verify(secret, payload, now));
+        assertThrows(IllegalArgumentException.class, () -> ConsoleBridgeProtocol.prepareCommand(
+                "vestridynamic spawn Bed Wars --send-player {player}"));
+    }
+
+    @Test
     void signsWithoutVelocityOrBukkitOnClasspath() throws Exception {
         try (URLClassLoader loader = new URLClassLoader(new java.net.URL[]{ConsoleBridgeProtocol.class.getProtectionDomain().getCodeSource().getLocation()},
                 ClassLoader.getPlatformClassLoader())) {
