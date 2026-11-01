@@ -90,6 +90,11 @@ func parsePluginSource(raw string) (pluginSource, error) {
 		if len(parts) >= 2 && validPart(parts[0]) && validPart(parts[1]) {
 			return pluginSource{Provider: "hangar", Project: parts[0] + "/" + parts[1]}, nil
 		}
+	case "github.com":
+		if parsed.RawQuery == "" && parsed.Fragment == "" && len(parts) == 5 &&
+			parts[0] == "dhernos" && parts[1] == "vestri-plugin" && parts[2] == "releases" && parts[3] == "tag" && parts[4] == "latest" {
+			return vestriPluginSource(), nil
+		}
 	case "hangarcdn.papermc.io":
 		if parsed.RawQuery != "" || parsed.Fragment != "" || len(parts) != 7 || parts[0] != "plugins" || parts[3] != "versions" || !validPart(parts[1]) || !validPart(parts[2]) || !validArtifactPart(parts[4]) || !validPart(parts[5]) || !validArtifactPart(parts[6]) || !strings.HasSuffix(strings.ToLower(parts[6]), ".jar") {
 			break
@@ -115,6 +120,10 @@ func trustedPluginDownloadURL(target *url.URL) bool {
 	}
 	switch strings.ToLower(target.Host) {
 	case "cdn.modrinth.com", "hangar.papermc.io", "hangarcdn.papermc.io":
+		return true
+	case "github.com":
+		return strings.HasPrefix(target.Path, "/dhernos/vestri-plugin/releases/download/latest/")
+	case "release-assets.githubusercontent.com":
 		return true
 	}
 	return false
@@ -180,6 +189,24 @@ func latestPluginRelease(ctx context.Context, source pluginSource, targets []plu
 		}
 	} else {
 		switch source.Provider {
+		case "github":
+			if source != vestriPluginSource() {
+				return release, nil, fmt.Errorf("unsupported GitHub plugin source")
+			}
+			var err error
+			release, err = resolveVestriPluginRelease(ctx)
+			if err != nil {
+				return release, nil, err
+			}
+			release.Filename = vestriPluginFilename
+			for _, target := range targets {
+				if strings.EqualFold(target.Platform, "PAPER") || strings.EqualFold(target.Platform, "VELOCITY") {
+					compatibleRefs = append(compatibleRefs, target.ServerRef)
+				}
+			}
+			if len(compatibleRefs) == 0 {
+				return pluginRelease{}, nil, fmt.Errorf("no Paper or Velocity targets are available for Vestri plugin")
+			}
 		case "modrinth":
 			loaders := make([]string, 0, len(targets))
 			for _, target := range targets {

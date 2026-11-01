@@ -358,6 +358,14 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	if template.ID == curseForgeTemplateID {
 		softwareVersion = "CURSEFORGE"
 	}
+	if req.ParentServerRef == "" && needsVestriPlugin(softwareVersion) {
+		unlock, lockErr := s.lockNodePlugins(r.Context(), node.ID)
+		if lockErr != nil {
+			writeError(w, http.StatusConflict, lockErr.Error())
+			return
+		}
+		defer unlock()
+	}
 
 	composeTemplate, err := resolveMinecraftComposeTemplate(template)
 	if err != nil {
@@ -571,6 +579,10 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadGateway, "Failed to download Minecraft server jar")
 			return
 		}
+	}
+	if err := s.ensureVestriPlugin(r.Context(), baseURL, apiKey, node.ID, rootPath, softwareVersion); err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
+		return
 	}
 
 	if parentServer != nil {
@@ -887,6 +899,19 @@ func (s *Server) handleGameServerStackAction(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
+	}
+	metadata := parseGameServerMetadata(server.Metadata)
+	if action == "up" && needsVestriPlugin(metadata.SoftwareVersion) {
+		unlock, err := s.lockNodePlugins(r.Context(), node.ID)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		defer unlock()
+		if err := s.ensureVestriPlugin(r.Context(), baseURL, apiKey, node.ID, server.RootPath, metadata.SoftwareVersion); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
+			return
+		}
 	}
 
 	output, err := s.workerStackAction(r.Context(), baseURL, apiKey, action, server.StackName)

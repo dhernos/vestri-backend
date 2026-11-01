@@ -57,6 +57,13 @@ func (s *Server) handleMinecraftInstancePower(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Invalid worker configuration")
 		return
 	}
+	if action == "up" {
+		metadata := parseGameServerMetadata(instance.Metadata)
+		if err = s.ensureVestriPlugin(ctx, baseURL, apiKey, principal.Node.ID, instance.RootPath, metadata.SoftwareVersion); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
+			return
+		}
+	}
 	if _, err = s.workerStackAction(ctx, baseURL, apiKey, action, instance.StackName); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to change instance power; files were preserved")
 		return

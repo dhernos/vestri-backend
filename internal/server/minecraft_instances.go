@@ -197,6 +197,11 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 				writeError(w, http.StatusConflict, "Instance record is incomplete")
 				return
 			}
+			metadata := parseGameServerMetadata(server.Metadata)
+			if err = s.ensureVestriPlugin(ctx, baseURL, apiKey, node.ID, server.RootPath, metadata.SoftwareVersion); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"message": "Failed to install Vestri plugin; retry the same requestId", "serverId": server.ID})
+				return
+			}
 			if _, err = s.workerStackAction(ctx, baseURL, apiKey, "up", server.StackName); err != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"message": "Instance could not start; retry with the same requestId or delete it", "serverId": server.ID})
 				return
@@ -308,6 +313,10 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 	}
 	if err = s.workerWriteFile(ctx, baseURL, apiKey, path.Join(slug, "docker-compose.yml"), compose); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to write instance configuration")
+		return
+	}
+	if err = s.ensureVestriPlugin(ctx, baseURL, apiKey, node.ID, slug, spec.Software); err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
 		return
 	}
 	secret, err := s.registerVelocityBackendAndResolveForwardingSecret(ctx, baseURL, apiKey, parent, instanceName, velocityBackendHostForSlug(slug), defaultMinecraftPort)

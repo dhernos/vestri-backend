@@ -550,14 +550,19 @@ func downloadVerifiedPlugin(ctx context.Context, release pluginRelease) (*os.Fil
 		return nil, fmt.Errorf("download is not a valid plugin JAR")
 	}
 	valid := false
+	paper, velocity := false, false
 	for _, entry := range archive.File {
+		paper = paper || entry.Name == "plugin.yml" || entry.Name == "paper-plugin.yml"
+		velocity = velocity || entry.Name == "velocity-plugin.json"
 		if entry.Name == "plugin.yml" || entry.Name == "paper-plugin.yml" || entry.Name == "velocity-plugin.json" {
 			valid = true
-			break
 		}
 	}
 	if !valid {
 		return nil, fmt.Errorf("JAR is missing its Paper/Bukkit/Velocity plugin descriptor")
+	}
+	if target.Host == "github.com" && (!paper || !velocity) {
+		return nil, fmt.Errorf("Vestri plugin JAR must support both Paper and Velocity")
 	}
 	keep = true
 	return temporary, nil
