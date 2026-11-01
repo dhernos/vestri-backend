@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path"
 	"regexp"
@@ -203,10 +205,12 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 				return
 			}
 			if _, err = s.workerStackAction(ctx, baseURL, apiKey, "up", server.StackName); err != nil {
+				logMinecraftInstanceFailure(ctx, "start", node.ID, server, true, err)
 				writeJSON(w, http.StatusBadGateway, map[string]string{"message": "Instance could not start; retry with the same requestId or delete it", "serverId": server.ID})
 				return
 			}
 			if err = s.reloadMinecraftInstanceProxy(ctx, pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, node.ID, server); err != nil {
+				logMinecraftInstanceFailure(ctx, "reload", node.ID, server, true, err)
 				writeJSON(w, http.StatusBadGateway, map[string]string{"message": "Instance exists, but Velocity could not reload; retry the same requestId", "serverId": server.ID})
 				return
 			}
@@ -348,14 +352,31 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 	}
 	committed = true
 	if _, err = s.workerStackAction(ctx, baseURL, apiKey, "up", slug); err != nil {
+		logMinecraftInstanceFailure(ctx, "start", node.ID, created, false, err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"message": "Instance was created but could not start; retry the same requestId or delete it", "serverId": created.ID})
 		return
 	}
 	if err = s.reloadMinecraftInstanceProxy(ctx, worker, node.ID, created); err != nil {
+		logMinecraftInstanceFailure(ctx, "reload", node.ID, created, false, err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"message": "Instance exists, but Velocity could not reload; retry the same requestId", "serverId": created.ID})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, minecraftInstanceResponse(created))
+}
+
+func minecraftInstanceErrorClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	default:
+		return "operation_failed"
+	}
+}
+
+func logMinecraftInstanceFailure(ctx context.Context, stage, nodeID string, server *auth.GameServer, retry bool, err error) {
+	log.Printf("minecraft instance post_commit_failure stage=%s node=%q server=%q stack=%q retry=%t error_class=%s error_type=%T context_error=%v", stage, nodeID, server.ID, server.StackName, retry, minecraftInstanceErrorClass(err), err, ctx.Err())
 }
 
 func (s *Server) reloadMinecraftInstanceProxy(ctx context.Context, worker pluginWorker, nodeID string, server *auth.GameServer) error {
@@ -403,7 +424,20 @@ func (s *Server) syncMinecraftProxy(ctx context.Context, worker pluginWorker, no
 	if err = s.workerWriteFile(ctx, worker.baseURL, worker.apiKey, path.Join(parent.RootPath, "data/vestri-dynamic-servers.json"), string(manifest)); err != nil {
 		return err
 	}
-	return worker.request(ctx, "/stack/velocity/reload", map[string]string{"stack": parent.StackName})
+	return reloadMinecraftProxyWorker(ctx, worker, nodeID, parent)
+}
+
+func reloadMinecraftProxyWorker(ctx context.Context, worker pluginWorker, nodeID string, parent *auth.GameServer) error {
+	code, _, err := worker.server.callWorkerJSON(ctx, worker.baseURL, worker.apiKey, http.MethodPost, "/stack/velocity/reload", map[string]string{"stack": parent.StackName})
+	if err != nil {
+		log.Printf("minecraft proxy sync stage=worker_reload node=%q proxy=%q stack=%q worker_status=%d error_class=%s error_type=%T", nodeID, parent.ID, parent.StackName, code, minecraftInstanceErrorClass(err), err)
+		return err
+	}
+	if code < 200 || code >= 300 {
+		log.Printf("minecraft proxy sync stage=worker_reload node=%q proxy=%q stack=%q worker_status=%d", nodeID, parent.ID, parent.StackName, code)
+		return fmt.Errorf("worker /stack/velocity/reload failed (HTTP %d)", code)
+	}
+	return nil
 }
 
 func minecraftInstanceResponse(server *auth.GameServer) map[string]interface{} {
