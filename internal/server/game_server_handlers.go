@@ -2840,6 +2840,9 @@ func (s *Server) cleanupGameServerOnWorker(ctx context.Context, baseURL *url.URL
 	_, _ = s.workerStackAction(ctx, baseURL, apiKey, "down", server.StackName)
 
 	paths := uniqueCleanupPaths(server.RootPath, server.StackName)
+	if strings.TrimSpace(server.ID) != "" {
+		paths = append(paths, gameServerSecretsFilePath(server))
+	}
 	for _, targetPath := range paths {
 		if err := s.workerDeletePath(ctx, baseURL, apiKey, targetPath, true); err != nil {
 			return err

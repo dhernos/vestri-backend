@@ -11,6 +11,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"yourapp/internal/auth"
 )
 
 const maxDecompressedServerLogBytes int64 = 32 << 20
@@ -19,7 +21,25 @@ var errServerLogTooLarge = errors.New("decompressed server log exceeds the maxim
 
 type gameServerLogFile struct {
 	Name string `json:"name"`
+	Path string `json:"path"`
 	Size int64  `json:"size"`
+}
+
+var defaultGameServerLogLocations = []gameServerTemplateLogLocation{
+	{Directory: "data/logs", Patterns: []string{"*.log", "*.log.gz"}},
+}
+
+// gameServerLogLocations resolves log locations from the server's template; servers
+// whose template no longer exists keep the historical Minecraft default.
+func gameServerLogLocations(server *auth.GameServer) []gameServerTemplateLogLocation {
+	if server == nil {
+		return nil
+	}
+	tpl, err := gameServerTemplateByID(strings.TrimSpace(server.TemplateID))
+	if err != nil || tpl == nil {
+		return defaultGameServerLogLocations
+	}
+	return tpl.LogLocations
 }
 
 func (s *Server) handleListGameServerLogFiles(w http.ResponseWriter, r *http.Request) {
@@ -37,38 +57,43 @@ func (s *Server) handleListGameServerLogFiles(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
-	logsPath := path.Join(server.RootPath, "data", "logs")
-	statusCode, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(logsPath), nil)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Worker request failed")
-		return
-	}
-	if statusCode == http.StatusNotFound {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("[]"))
-		return
-	}
-	if statusCode < 200 || statusCode >= 300 {
-		http.Error(w, strings.TrimSpace(string(body)), statusCode)
-		return
-	}
 
-	var entries []struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-		Size int64  `json:"size"`
-	}
-	if err := json.Unmarshal(body, &entries); err != nil {
-		writeError(w, http.StatusBadGateway, "Invalid worker directory response")
-		return
-	}
-	files := make([]gameServerLogFile, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Type == "file" && isGameServerLogFileName(entry.Name) {
-			files = append(files, gameServerLogFile{Name: entry.Name, Size: entry.Size})
+	files := make([]gameServerLogFile, 0)
+	for _, location := range gameServerLogLocations(server) {
+		logsPath := path.Join(server.RootPath, location.Directory)
+		statusCode, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(logsPath), nil)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "Worker request failed")
+			return
+		}
+		if statusCode == http.StatusNotFound {
+			continue
+		}
+		if statusCode < 200 || statusCode >= 300 {
+			http.Error(w, strings.TrimSpace(string(body)), statusCode)
+			return
+		}
+
+		var entries []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			Size int64  `json:"size"`
+		}
+		if err := json.Unmarshal(body, &entries); err != nil {
+			writeError(w, http.StatusBadGateway, "Invalid worker directory response")
+			return
+		}
+		for _, entry := range entries {
+			if entry.Type == "file" && logLocationMatches(location, entry.Name) {
+				files = append(files, gameServerLogFile{
+					Name: entry.Name,
+					Path: path.Join(location.Directory, entry.Name),
+					Size: entry.Size,
+				})
+			}
 		}
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(files); err != nil {
 		return
@@ -85,9 +110,9 @@ func (s *Server) handleReadGameServerLogFile(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	name := r.URL.Query().Get("name")
-	if !isGameServerLogFileName(name) {
-		writeError(w, http.StatusBadRequest, "Invalid log file name")
+	relativePath, ok := resolveGameServerLogPath(gameServerLogLocations(server), r.URL.Query().Get("path"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "Invalid log file path")
 		return
 	}
 	baseURL, apiKey, err := s.workerTargetFromNode(node)
@@ -95,7 +120,7 @@ func (s *Server) handleReadGameServerLogFile(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
 	}
-	filePath := path.Join(server.RootPath, "data", "logs", name)
+	filePath := path.Join(server.RootPath, relativePath)
 	statusCode, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/read?path="+url.QueryEscape(filePath), nil)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker request failed")
@@ -105,7 +130,7 @@ func (s *Server) handleReadGameServerLogFile(w http.ResponseWriter, r *http.Requ
 		http.Error(w, strings.TrimSpace(string(body)), statusCode)
 		return
 	}
-	if strings.HasSuffix(strings.ToLower(name), ".log.gz") {
+	if strings.HasSuffix(strings.ToLower(relativePath), ".gz") {
 		body, err = decompressServerLog(body)
 		if err != nil {
 			if errors.Is(err, errServerLogTooLarge) {
@@ -123,16 +148,46 @@ func (s *Server) handleReadGameServerLogFile(w http.ResponseWriter, r *http.Requ
 }
 
 func isGameServerLogFileName(name string) bool {
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) || path.Base(name) != name {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\\`) && path.Base(name) == name
+}
+
+func logLocationMatches(location gameServerTemplateLogLocation, name string) bool {
+	if !isGameServerLogFileName(name) {
 		return false
 	}
 	lowerName := strings.ToLower(name)
-	return strings.HasSuffix(lowerName, ".log") || strings.HasSuffix(lowerName, ".log.gz")
+	for _, pattern := range location.Patterns {
+		if matched, err := path.Match(strings.ToLower(pattern), lowerName); err == nil && matched {
+			return true
+		}
+	}
+	return false
 }
 
-func isCompressedServerLogPath(serverRoot, filePath string) bool {
-	logsRoot := path.Join(serverRoot, "data", "logs")
-	return path.Dir(filePath) == logsRoot && strings.HasSuffix(strings.ToLower(filePath), ".log.gz")
+// resolveGameServerLogPath validates a server-root-relative log path against the configured locations.
+func resolveGameServerLogPath(locations []gameServerTemplateLogLocation, rawPath string) (string, bool) {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" || strings.Contains(rawPath, `\`) {
+		return "", false
+	}
+	cleaned := path.Clean(strings.TrimPrefix(rawPath, "/"))
+	directory, name := path.Split(cleaned)
+	directory = strings.TrimSuffix(directory, "/")
+	for _, location := range locations {
+		if location.Directory == directory && logLocationMatches(location, name) {
+			return cleaned, true
+		}
+	}
+	return "", false
+}
+
+func isCompressedServerLogPath(locations []gameServerTemplateLogLocation, serverRoot, filePath string) bool {
+	prefix := strings.Trim(serverRoot, "/") + "/"
+	if !strings.HasPrefix(filePath, prefix) || !strings.HasSuffix(strings.ToLower(filePath), ".gz") {
+		return false
+	}
+	_, ok := resolveGameServerLogPath(locations, strings.TrimPrefix(filePath, prefix))
+	return ok
 }
 
 func decompressServerLog(data []byte) ([]byte, error) {

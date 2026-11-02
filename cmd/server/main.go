@@ -93,6 +93,10 @@ func main() {
 		log.Fatalf("server init error: %v", err)
 	}
 
+	notificationCtx, cancelNotifications := context.WithCancel(context.Background())
+	defer cancelNotifications()
+	go api.RunNotifications(notificationCtx)
+
 	addr := ":" + cfg.Port
 	srv := &http.Server{
 		Addr:         addr,

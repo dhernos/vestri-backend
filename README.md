@@ -4,6 +4,48 @@ Backend documentation lives in the main repository:
 
 - https://github.com/dhernos/vestri
 
+## Notifications
+
+Migration `000009_notifications` adds a persistent inbox, per-user preferences,
+health tracking and a delivery queue. It runs automatically at backend startup
+unless `AUTO_MIGRATE` is disabled. Apply the migration manually before starting
+the new backend when automatic migrations are disabled. No worker update is
+required.
+
+The Notifications page provides switches for server creation, server deletion,
+unhealthy workers and servers going down. Events are enabled by default; email
+and webhook delivery are opt-in. Server events go to the node owner and explicit
+server guests, following existing server access rules. Creation also notifies
+the creator. Worker alerts go to the node owner and node guests.
+
+The backend polls workers every 15 seconds, independently of open browsers. A
+worker is healthy only when both `/health` fields `status` and
+`external_service` are `OK`. Failures must persist for more than 60 seconds.
+Only one notification is generated per outage, with recovery resetting the
+timer. Health state survives backend restarts, and PostgreSQL advisory locks
+coordinate multiple backend processes. Unknown server status or an unreachable
+worker does not generate additional server-down alerts. A server must have been
+observed running before its first down alert. Intentional stops also qualify.
+
+Email uses the existing `EMAIL_SERVER_*` and `EMAIL_FROM` configuration and the
+user's current verified account address. Webhooks require a public HTTPS URL
+on port 443. Private, loopback and link-local destinations, redirects and proxy
+environment settings are not allowed. The URL is encrypted using the existing
+`NODE_API_KEY_ENCRYPTION_KEY`. Event switches are checked again before delivery.
+
+Webhook POSTs contain `id`, `kind`, node/server identifiers and names,
+`createdAt`, and localized `content`/`text`. Discord mentions are disabled. Headers
+`X-Vestri-Event` and `X-Vestri-Notification-ID` identify the event. Delivery is
+at least once; receivers should deduplicate using the notification ID. Failed
+channels are retried up to five times with exponential backoff; successful
+channels are not intentionally retried. Exhausted delivery appears in the inbox.
+
+Inbox endpoints are session-protected: `GET /api/notifications` (50 events per
+page; `before` and `beforeId` cursors), `GET/POST /api/notifications/settings`,
+`POST /api/notifications/read`, and
+`POST /api/notifications/{notificationId}/read`. Read operations only affect
+the authenticated user's inbox.
+
 Velocity dynamic-server plugin setup and console commands:
 https://github.com/dhernos/vestri-plugin
 

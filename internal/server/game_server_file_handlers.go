@@ -152,7 +152,7 @@ func (s *Server) handleReadGameServerFile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	compressedLog := isCompressedServerLogPath(server.RootPath, fullPath)
+	compressedLog := isCompressedServerLogPath(gameServerLogLocations(server), server.RootPath, fullPath)
 	if !isTextFilePath(fullPath) && !compressedLog {
 		writeError(w, http.StatusUnsupportedMediaType, "Only text file formats can be opened in editor")
 		return

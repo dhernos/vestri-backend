@@ -106,6 +106,11 @@ func (s *Server) Router() http.Handler {
 	r.Group(func(pr chi.Router) {
 		pr.Use(s.requireSession(true))
 		s.registerMinecraftRoutes(pr)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/notifications"))).Get("/api/notifications", s.handleListNotifications)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/notifications/settings"))).Get("/api/notifications/settings", s.handleNotificationSettings)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/notifications/settings"))).Post("/api/notifications/settings", s.handleNotificationSettings)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/notifications/read"))).Post("/api/notifications/read", s.handleReadNotifications)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/notifications/{notificationId}/read"))).Post("/api/notifications/{notificationId}/read", s.handleReadNotifications)
 
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/auth/me"))).Get("/api/auth/me", s.handleMe)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/sessions"))).Get("/api/sessions", s.handleListSessions)
@@ -194,6 +199,9 @@ func (s *Server) Router() http.Handler {
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/plugins/update"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/group-files/plugins/update", s.handleUpdatePlugin)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/group-files/plugins/remove"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/group-files/plugins/remove", s.handleRemovePluginTracking)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/backups"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/backups", s.handleGameServerBackups)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/secrets"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/secrets", s.handleListGameServerSecrets)
+		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/secrets"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/secrets", s.handleCreateGameServerSecret)
+		pr.With(s.requireRoles(accessRoles(http.MethodDelete, "/api/nodes/{nodeRef}/servers/{serverRef}/secrets/{secretKey}"))).Delete("/api/nodes/{nodeRef}/servers/{serverRef}/secrets/{secretKey}", s.handleDeleteGameServerSecret)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/nodes/{nodeRef}/servers/{serverRef}/databases"))).Get("/api/nodes/{nodeRef}/servers/{serverRef}/databases", s.handleGameServerDatabases)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/databases"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/databases", s.handleGameServerDatabases)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/nodes/{nodeRef}/servers/{serverRef}/databases/action"))).Post("/api/nodes/{nodeRef}/servers/{serverRef}/databases/action", s.handleGameServerDatabaseAction)

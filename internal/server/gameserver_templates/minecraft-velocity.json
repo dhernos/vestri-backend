@@ -21,5 +21,11 @@
       "format": "text",
       "defaultContent": "{{VELOCITY_FORWARDING_SECRET}}\n"
     }
+  ],
+  "logLocations": [
+    {
+      "directory": "data/logs",
+      "patterns": ["*.log", "*.log.gz"]
+    }
   ]
 }

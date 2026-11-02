@@ -39,5 +39,11 @@
       "format": "text",
       "defaultContent": "eula=true\n"
     }
+  ],
+  "logLocations": [
+    {
+      "directory": "data/logs",
+      "patterns": ["*.log", "*.log.gz"]
+    }
   ]
 }
