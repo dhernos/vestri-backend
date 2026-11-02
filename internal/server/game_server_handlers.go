@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -3058,43 +3059,53 @@ func (s *Server) callWorkerJSON(ctx context.Context, baseURL *url.URL, apiKey, m
 
 	var (
 		bodyBytes []byte
-		body      io.Reader
 	)
 	if payload != nil {
 		bodyBytes, err = json.Marshal(payload)
 		if err != nil {
 			return 0, nil, err
 		}
-		body = bytes.NewReader(bodyBytes)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, targetURL.String(), body)
-	if err != nil {
-		return 0, nil, err
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, targetURL.String(), bytes.NewReader(bodyBytes))
+		if err != nil {
+			return 0, nil, err
+		}
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		nonce := strings.ReplaceAll(auth.NewSessionID(), "-", "")
+		signature := signWorkerRequest(apiKey, ts, nonce, method, signedPath)
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-Request-Timestamp", ts)
+		req.Header.Set("X-Request-Nonce", nonce)
+		req.Header.Set("X-Request-Signature", signature)
+
+		resp, err := workerHTTPClient.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxWorkerResponseBytes))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return 0, nil, readErr
+		}
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= 2 {
+			return resp.StatusCode, respBody, nil
+		}
+		delay := time.Second
+		if seconds, parseErr := strconv.Atoi(resp.Header.Get("Retry-After")); parseErr == nil && seconds >= 1 && seconds <= 30 {
+			delay = time.Duration(seconds) * time.Second
+		}
+		log.Printf("worker request throttled status=429 method=%s path=%q retry=%d delay=%s", method, pathname, attempt+1, delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	nonce := strings.ReplaceAll(auth.NewSessionID(), "-", "")
-	signature := signWorkerRequest(apiKey, ts, nonce, method, signedPath)
-
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("X-Request-Timestamp", ts)
-	req.Header.Set("X-Request-Nonce", nonce)
-	req.Header.Set("X-Request-Signature", signature)
-
-	resp, err := workerHTTPClient.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxWorkerResponseBytes))
-	if err != nil {
-		return 0, nil, err
-	}
-
-	return resp.StatusCode, respBody, nil
 }
