@@ -341,6 +341,10 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if err = s.applyVelocityBackendProxySettings(ctx, baseURL, apiKey, slug, spec.Software, secret, whitelistEnabled); err != nil {
+		var failure *minecraftForwardingSettingsError
+		if errors.As(err, &failure) {
+			log.Printf("minecraft instance forwarding_failure node=%q request=%q stack=%q operation=%s file=%q error_class=%s error_type=%T", node.ID, request.RequestID, slug, failure.operation, failure.file, minecraftInstanceErrorClass(failure.cause), failure.cause)
+		}
 		writeError(w, http.StatusBadGateway, "Failed to configure Velocity forwarding")
 		return
 	}

@@ -2427,6 +2427,20 @@ func parseTomlStringList(assignment string) []string {
 	return result
 }
 
+type minecraftForwardingSettingsError struct {
+	operation string
+	file      string
+	cause     error
+}
+
+func (failure *minecraftForwardingSettingsError) Error() string {
+	return "failed to " + failure.operation + " " + failure.file
+}
+
+func (failure *minecraftForwardingSettingsError) Unwrap() error {
+	return failure.cause
+}
+
 func (s *Server) applyVelocityBackendProxySettings(
 	ctx context.Context,
 	baseURL *url.URL,
@@ -2436,12 +2450,12 @@ func (s *Server) applyVelocityBackendProxySettings(
 	backendPropertiesPath := path.Join(rootPath, backendServerPropertiesRelative)
 	propertiesContent, _, err := s.workerReadFileOptional(ctx, baseURL, apiKey, backendPropertiesPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendServerPropertiesRelative, err}
 	}
 	propertiesContent = upsertJavaPropertiesValue(propertiesContent, "online-mode", "false")
 	propertiesContent = upsertJavaPropertiesValue(propertiesContent, "white-list", strconv.FormatBool(whitelistEnabled))
 	if err := s.workerWriteFile(ctx, baseURL, apiKey, backendPropertiesPath, propertiesContent); err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"write", backendServerPropertiesRelative, err}
 	}
 
 	normalizedSoftware := strings.ToUpper(strings.TrimSpace(softwareVersion))
@@ -2451,24 +2465,24 @@ func (s *Server) applyVelocityBackendProxySettings(
 	paperConfigPath := path.Join(rootPath, backendPaperGlobalRelative)
 	paperContent, paperMissing, err := s.workerReadFileOptional(ctx, baseURL, apiKey, paperConfigPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendPaperGlobalRelative, err}
 	}
 	if !paperMissing || needsPaperConfig {
 		paperContent = upsertPaperGlobalVelocitySettings(paperContent, forwardingSecret)
 		if err := s.workerWriteFile(ctx, baseURL, apiKey, paperConfigPath, paperContent); err != nil {
-			return err
+			return &minecraftForwardingSettingsError{"write", backendPaperGlobalRelative, err}
 		}
 	}
 
 	spigotConfigPath := path.Join(rootPath, backendSpigotConfigRelative)
 	spigotContent, spigotMissing, err := s.workerReadFileOptional(ctx, baseURL, apiKey, spigotConfigPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendSpigotConfigRelative, err}
 	}
 	if !spigotMissing || needsSpigotConfig {
 		spigotContent = upsertSpigotVelocitySettings(spigotContent, forwardingSecret)
 		if err := s.workerWriteFile(ctx, baseURL, apiKey, spigotConfigPath, spigotContent); err != nil {
-			return err
+			return &minecraftForwardingSettingsError{"write", backendSpigotConfigRelative, err}
 		}
 	}
 
