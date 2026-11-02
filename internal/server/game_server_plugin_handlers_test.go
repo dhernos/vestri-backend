@@ -19,9 +19,31 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"yourapp/internal/auth"
 )
+
+func TestForceRefreshTrackedPlugins(t *testing.T) {
+	plugin := trackedPlugin{CheckedAt: time.Now().UTC()}
+	if shouldCheckTrackedPlugin(plugin, false, false) {
+		t.Fatal("ordinary refresh bypassed the check interval")
+	}
+	if !shouldCheckTrackedPlugin(plugin, false, true) {
+		t.Fatal("forced refresh did not bypass the check interval")
+	}
+	if !shouldCheckTrackedPlugin(plugin, true, false) {
+		t.Fatal("changed compatibility targets did not trigger a check")
+	}
+	plugin.CheckedAt = time.Now().Add(-pluginCheckInterval - time.Second)
+	if !shouldCheckTrackedPlugin(plugin, false, false) {
+		t.Fatal("expired check was skipped")
+	}
+	plugin.Source.Version = "pinned-version"
+	if shouldCheckTrackedPlugin(plugin, true, true) {
+		t.Fatal("forced refresh must preserve pinned versions")
+	}
+}
 
 func TestMinecraftPluginLibraryPath(t *testing.T) {
 	if got := minecraftPluginLibraryPath("node-a"); got != ".vestri-minecraft/node-a/plugins" {

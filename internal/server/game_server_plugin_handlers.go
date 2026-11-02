@@ -222,6 +222,10 @@ func (s *Server) handleTrackedPlugins(w http.ResponseWriter, r *http.Request) {
 	s.handlePluginOperation(w, r, "list")
 }
 
+func shouldCheckTrackedPlugin(plugin trackedPlugin, targetsChanged, force bool) bool {
+	return plugin.Source.Version == "" && (force || targetsChanged || time.Since(plugin.CheckedAt) >= pluginCheckInterval)
+}
+
 func (s *Server) handleImportPlugin(w http.ResponseWriter, r *http.Request) {
 	s.handlePluginOperation(w, r, "import")
 }
@@ -291,7 +295,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 				changed = true
 				continue
 			}
-			if !targetsChanged && time.Since(plugin.CheckedAt) < pluginCheckInterval {
+			if !shouldCheckTrackedPlugin(*plugin, targetsChanged, r.URL.Query().Get("force") == "true") {
 				continue
 			}
 			release, targetRefs, checkErr := latestPluginRelease(ctx, plugin.Source, compatibilityTargets)
