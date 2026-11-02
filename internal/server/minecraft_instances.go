@@ -494,6 +494,57 @@ func minecraftKeyCanAccessInstance(key *auth.MinecraftAPIKey, instance auth.Mine
 	return key != nil && key.ID != "" && instance.KeyID == key.ID && instance.TemplateID == key.TemplateID
 }
 
+func minecraftRequestInstance(key *auth.MinecraftAPIKey, instances []auth.MinecraftInstance, requestID string) *auth.MinecraftInstance {
+	if key == nil || key.ID == "" {
+		return nil
+	}
+	digest := sha256.Sum256([]byte(key.ID + ":" + requestID))
+	hashed := hex.EncodeToString(digest[:])
+	for _, instance := range instances {
+		if instance.RequestID == hashed && minecraftKeyCanAccessInstance(key, instance) {
+			return &instance
+		}
+	}
+	return nil
+}
+
+func (s *Server) handleFindMinecraftRequestInstance(w http.ResponseWriter, r *http.Request) {
+	principal, ok := r.Context().Value(minecraftAPIContextKey{}).(minecraftAPIPrincipal)
+	if !ok || principal.Key == nil || principal.Node == nil {
+		writeError(w, http.StatusUnauthorized, "A valid Bearer API key is required")
+		return
+	}
+	requestID := chi.URLParam(r, "requestId")
+	if _, err := uuid.Parse(requestID); err != nil {
+		writeError(w, http.StatusBadRequest, "requestId must be a UUID")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	unlock, err := s.lockNodePlugins(ctx, principal.Node.ID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	defer unlock()
+	instances, err := s.Users.ListMinecraftInstances(ctx, principal.Node.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to load instances")
+		return
+	}
+	instance := minecraftRequestInstance(principal.Key, instances, requestID)
+	if instance == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"instance": nil})
+		return
+	}
+	server, err := s.Users.FindGameServerByRefForNode(ctx, principal.Node.ID, instance.ServerID)
+	if err != nil || server == nil {
+		writeError(w, http.StatusConflict, "Instance record is incomplete")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"instance": minecraftInstanceResponse(server)})
+}
+
 func (s *Server) handleDeleteMinecraftInstance(w http.ResponseWriter, r *http.Request) {
 	principal, api := r.Context().Value(minecraftAPIContextKey{}).(minecraftAPIPrincipal)
 	var node *auth.WorkerNode

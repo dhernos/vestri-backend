@@ -79,6 +79,7 @@ func (s *Server) Router() http.Handler {
 	r.Route("/api/minecraft/v1/instances", func(api chi.Router) {
 		api.Use(s.requireMinecraftAPIKey)
 		api.Get("/", s.handleListMinecraftAPIInstances)
+		api.Get("/requests/{requestId}", s.handleFindMinecraftRequestInstance)
 		api.Post("/", s.handleSpawnMinecraftInstance)
 		api.Delete("/{instanceId}", s.handleDeleteMinecraftInstance)
 		api.Post("/{instanceId}/start", s.handleStartMinecraftInstance)
