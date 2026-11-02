@@ -19,14 +19,25 @@ import (
 )
 
 func TestVestriPluginPlatforms(t *testing.T) {
-	for _, software := range []string{"PAPER", "paper", "VELOCITY", "velocity"} {
-		if !needsVestriPlugin(software) {
-			t.Errorf("missing automatic plugin for %s", software)
-		}
+	tests := []struct {
+		software string
+		kind     string
+		want     bool
+	}{
+		{software: "VELOCITY", kind: gameServerKindVelocity, want: true},
+		{software: "velocity", kind: gameServerKindVelocity, want: true},
+		{software: "PAPER", kind: gameServerKindVelocityBackend, want: true},
+		{software: "PURPUR", kind: gameServerKindVelocityBackend, want: true},
+		{software: "SPIGOT", kind: gameServerKindVelocityBackend, want: true},
+		{software: "BUKKIT", kind: gameServerKindVelocityBackend, want: true},
+		{software: "PAPER", kind: gameServerKindStandalone},
+		{software: "VANILLA", kind: gameServerKindVelocityBackend},
+		{software: "VELOCITY", kind: gameServerKindStandalone},
+		{software: "PAPER", kind: gameServerKindVelocity},
 	}
-	for _, software := range []string{"VANILLA", "FABRIC", "FORGE", "CURSEFORGE", ""} {
-		if needsVestriPlugin(software) {
-			t.Errorf("unexpected automatic plugin for %s", software)
+	for _, test := range tests {
+		if got := needsVestriPlugin(test.software, test.kind); got != test.want {
+			t.Errorf("needsVestriPlugin(%q, %q) = %v, want %v", test.software, test.kind, got, test.want)
 		}
 	}
 }
@@ -124,6 +135,7 @@ func TestEnsureVestriPlugin(t *testing.T) {
 	tests := []struct {
 		name         string
 		software     string
+		kind         string
 		existing     bool
 		badChecksum  bool
 		uploadStatus int
@@ -134,17 +146,18 @@ func TestEnsureVestriPlugin(t *testing.T) {
 		missingStage bool
 		fail         bool
 	}{
-		{name: "Paper installs and skips next start", software: "PAPER"},
-		{name: "Velocity installs and skips next start", software: "VELOCITY"},
-		{name: "already installed avoids GitHub", software: "PAPER", existing: true},
-		{name: "Vanilla skips all work", software: "VANILLA"},
-		{name: "checksum failure preserves old plugin", software: "PAPER", badChecksum: true, fail: true},
-		{name: "upload failure preserves old plugin", software: "PAPER", uploadStatus: 500, fail: true},
-		{name: "copy failure preserves old plugin", software: "VELOCITY", copyStatus: 500, fail: true},
-		{name: "tracking save failure preserves old plugin", software: "PAPER", saveStatus: 500, fail: true},
-		{name: "invalid tracking fails closed", software: "PAPER", badManifest: true, fail: true},
-		{name: "pending update is not overwritten", software: "PAPER", pending: true, fail: true},
-		{name: "missing tracked staged file fails closed", software: "VELOCITY", missingStage: true, fail: true},
+		{name: "Paper backend installs and skips next start", software: "PAPER", kind: gameServerKindVelocityBackend},
+		{name: "Velocity installs and skips next start", software: "VELOCITY", kind: gameServerKindVelocity},
+		{name: "already installed avoids GitHub", software: "PAPER", kind: gameServerKindVelocityBackend, existing: true},
+		{name: "Vanilla backend skips all work", software: "VANILLA", kind: gameServerKindVelocityBackend},
+		{name: "standalone Paper skips all work", software: "PAPER", kind: gameServerKindStandalone},
+		{name: "checksum failure preserves old plugin", software: "PAPER", kind: gameServerKindVelocityBackend, badChecksum: true, fail: true},
+		{name: "upload failure preserves old plugin", software: "PAPER", kind: gameServerKindVelocityBackend, uploadStatus: 500, fail: true},
+		{name: "copy failure preserves old plugin", software: "VELOCITY", kind: gameServerKindVelocity, copyStatus: 500, fail: true},
+		{name: "tracking save failure preserves old plugin", software: "PAPER", kind: gameServerKindVelocityBackend, saveStatus: 500, fail: true},
+		{name: "invalid tracking fails closed", software: "PAPER", kind: gameServerKindVelocityBackend, badManifest: true, fail: true},
+		{name: "pending update is not overwritten", software: "PAPER", kind: gameServerKindVelocityBackend, pending: true, fail: true},
+		{name: "missing tracked staged file fails closed", software: "VELOCITY", kind: gameServerKindVelocity, missingStage: true, fail: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -278,14 +291,14 @@ func TestEnsureVestriPlugin(t *testing.T) {
 			t.Cleanup(workerServer.Close)
 			baseURL, _ := url.Parse(workerServer.URL)
 			server := &Server{}
-			err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, root, test.software)
+			err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, root, test.software, test.kind)
 			if (err != nil) != test.fail {
 				t.Fatalf("install error = %v, want failure %v", err, test.fail)
 			}
 			mutex.Lock()
-			if test.software == "VANILLA" {
+			if !needsVestriPlugin(test.software, test.kind) {
 				if requests != 0 || downloads != 0 {
-					t.Error("unsupported platform caused network/filesystem calls")
+					t.Error("ineligible server caused network/filesystem calls")
 				}
 			} else if test.fail {
 				if _, exists := files[destination]; exists {
@@ -300,7 +313,7 @@ func TestEnsureVestriPlugin(t *testing.T) {
 			} else if !bytes.Equal(files[destination], jar) {
 				t.Error("installed plugin does not match verified release")
 			}
-			if !test.fail && needsVestriPlugin(test.software) {
+			if !test.fail && needsVestriPlugin(test.software, test.kind) {
 				if _, exists := files[oldPath]; exists {
 					t.Error("installation left a duplicate old Vestri plugin")
 				}
@@ -330,15 +343,15 @@ func TestEnsureVestriPlugin(t *testing.T) {
 			mutex.Unlock()
 			if !test.fail {
 				before := downloads
-				if err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, root, test.software); err != nil {
+				if err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, root, test.software, test.kind); err != nil {
 					t.Fatal(err)
 				}
 				if downloads != before {
 					t.Error("repeat start re-downloaded installed plugin")
 				}
-				if needsVestriPlugin(test.software) {
+				if needsVestriPlugin(test.software, test.kind) {
 					secondRoot := "second-server"
-					if err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, secondRoot, test.software); err != nil {
+					if err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, secondRoot, test.software, test.kind); err != nil {
 						t.Fatal(err)
 					}
 					mutex.Lock()
@@ -355,11 +368,11 @@ func TestEnsureVestriPlugin(t *testing.T) {
 					manifest.Plugins[1].Installed.Version = "updated-release"
 					files[manifestPath], _ = json.Marshal(manifest)
 					mutex.Unlock()
-					if err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, root, test.software); err != nil {
+					if err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, root, test.software, test.kind); err != nil {
 						t.Fatal(err)
 					}
 					thirdRoot := "third-server"
-					if err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, thirdRoot, test.software); err != nil {
+					if err := server.ensureVestriPlugin(context.Background(), baseURL, "worker-test-key", nodeID, thirdRoot, test.software, test.kind); err != nil {
 						t.Fatal(err)
 					}
 					mutex.Lock()

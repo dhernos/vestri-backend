@@ -81,6 +81,8 @@ var endpointAccess = []AccessRule{
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/map/view/*", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/logs/stream", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/logs/ws", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/logs/files", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/logs/file", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/exec/ws", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/exec/session", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodDelete, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/console/exec/session", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},

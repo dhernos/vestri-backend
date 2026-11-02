@@ -21,10 +21,12 @@ func vestriPluginSource() pluginSource {
 	return pluginSource{Provider: "github", Project: "dhernos/vestri-plugin"}
 }
 
-func needsVestriPlugin(software string) bool {
-	switch normalizeMinecraftSoftware(software) {
-	case minecraftSoftwarePaper, minecraftSoftwareVelocity:
-		return true
+func needsVestriPlugin(software, kind string) bool {
+	switch normalizeGameServerKindValue(kind) {
+	case gameServerKindVelocity:
+		return normalizeMinecraftSoftware(software) == minecraftSoftwareVelocity
+	case gameServerKindVelocityBackend:
+		return supportsVelocityBackendSoftware(software)
 	default:
 		return false
 	}
@@ -75,8 +77,8 @@ func resolveVestriPluginRelease(ctx context.Context) (pluginRelease, error) {
 	return release, nil
 }
 
-func (s *Server) ensureVestriPlugin(ctx context.Context, baseURL *url.URL, apiKey, nodeID, rootPath, software string) error {
-	if !needsVestriPlugin(software) {
+func (s *Server) ensureVestriPlugin(ctx context.Context, baseURL *url.URL, apiKey, nodeID, rootPath, software, kind string) error {
+	if !needsVestriPlugin(software, kind) {
 		return nil
 	}
 	directory := path.Join(rootPath, backendPluginsRelativePath)

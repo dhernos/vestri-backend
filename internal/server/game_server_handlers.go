@@ -358,7 +358,13 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	if template.ID == curseForgeTemplateID {
 		softwareVersion = "CURSEFORGE"
 	}
-	if req.ParentServerRef == "" && needsVestriPlugin(softwareVersion) {
+	requestedKind := gameServerKindStandalone
+	if req.ParentServerRef != "" {
+		requestedKind = gameServerKindVelocityBackend
+	} else if isVelocityTemplate(template) {
+		requestedKind = gameServerKindVelocity
+	}
+	if needsVestriPlugin(softwareVersion, requestedKind) {
 		unlock, lockErr := s.lockNodePlugins(r.Context(), node.ID)
 		if lockErr != nil {
 			writeError(w, http.StatusConflict, lockErr.Error())
@@ -580,7 +586,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	if err := s.ensureVestriPlugin(r.Context(), baseURL, apiKey, node.ID, rootPath, softwareVersion); err != nil {
+	if err := s.ensureVestriPlugin(r.Context(), baseURL, apiKey, node.ID, rootPath, softwareVersion, metadata.Kind); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
 		return
 	}
@@ -901,14 +907,15 @@ func (s *Server) handleGameServerStackAction(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	metadata := parseGameServerMetadata(server.Metadata)
-	if action == "up" && needsVestriPlugin(metadata.SoftwareVersion) {
+	kind := resolvedGameServerKind(server, metadata)
+	if action == "up" && needsVestriPlugin(metadata.SoftwareVersion, kind) {
 		unlock, err := s.lockNodePlugins(r.Context(), node.ID)
 		if err != nil {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		defer unlock()
-		if err := s.ensureVestriPlugin(r.Context(), baseURL, apiKey, node.ID, server.RootPath, metadata.SoftwareVersion); err != nil {
+		if err := s.ensureVestriPlugin(r.Context(), baseURL, apiKey, node.ID, server.RootPath, metadata.SoftwareVersion, kind); err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
 			return
 		}
@@ -1167,11 +1174,14 @@ func isVelocityServer(server *auth.GameServer) bool {
 		return false
 	}
 	metadata := parseGameServerMetadata(server.Metadata)
-	kind := normalizeGameServerKindValue(metadata.Kind)
-	if kind == "" {
-		kind = inferGameServerKind(server, metadata)
+	return resolvedGameServerKind(server, metadata) == gameServerKindVelocity
+}
+
+func resolvedGameServerKind(server *auth.GameServer, metadata gameServerStoredMetadata) string {
+	if kind := normalizeGameServerKindValue(metadata.Kind); kind != "" {
+		return kind
 	}
-	return kind == gameServerKindVelocity
+	return inferGameServerKind(server, metadata)
 }
 
 func validateVelocityBackendTemplate(template *gameServerTemplate) error {

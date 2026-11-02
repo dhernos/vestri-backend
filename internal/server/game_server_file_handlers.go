@@ -152,7 +152,8 @@ func (s *Server) handleReadGameServerFile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !isTextFilePath(fullPath) {
+	compressedLog := isCompressedServerLogPath(server.RootPath, fullPath)
+	if !isTextFilePath(fullPath) && !compressedLog {
 		writeError(w, http.StatusUnsupportedMediaType, "Only text file formats can be opened in editor")
 		return
 	}
@@ -171,6 +172,17 @@ func (s *Server) handleReadGameServerFile(w http.ResponseWriter, r *http.Request
 	if statusCode < 200 || statusCode >= 300 {
 		http.Error(w, strings.TrimSpace(string(body)), statusCode)
 		return
+	}
+	if compressedLog {
+		body, err = decompressServerLog(body)
+		if err != nil {
+			if errors.Is(err, errServerLogTooLarge) {
+				writeError(w, http.StatusRequestEntityTooLarge, "Decompressed log exceeds the maximum size")
+				return
+			}
+			writeError(w, http.StatusUnprocessableEntity, "Invalid compressed log file")
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

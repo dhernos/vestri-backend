@@ -59,7 +59,7 @@ func (s *Server) handleMinecraftInstancePower(w http.ResponseWriter, r *http.Req
 	}
 	if action == "up" {
 		metadata := parseGameServerMetadata(instance.Metadata)
-		if err = s.ensureVestriPlugin(ctx, baseURL, apiKey, principal.Node.ID, instance.RootPath, metadata.SoftwareVersion); err != nil {
+		if err = s.ensureVestriPlugin(ctx, baseURL, apiKey, principal.Node.ID, instance.RootPath, metadata.SoftwareVersion, resolvedGameServerKind(instance, metadata)); err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
 			return
 		}
