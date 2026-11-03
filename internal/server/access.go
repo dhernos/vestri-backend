@@ -35,6 +35,7 @@ var endpointAccess = []AccessRule{
 
 	{Method: http.MethodGet, Path: "/api/auth/me", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/notifications", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodGet, Path: "/api/notifications/unread", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/notifications/settings", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/notifications/settings", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/notifications/read", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},

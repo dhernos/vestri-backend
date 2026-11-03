@@ -169,6 +169,20 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, 200, map[string]any{"notifications": messages, "hasMore": hasMore, "unread": unread})
 }
 
+func (s *Server) handleUnreadNotifications(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFromContext(r.Context())
+	if sess == nil {
+		writeError(w, 401, "Unauthorized")
+		return
+	}
+	var unread int
+	if err := s.Users.DB.QueryRow(r.Context(), `SELECT COUNT(*) FROM "Notification" WHERE "userId"=$1 AND "readAt" IS NULL`, sess.UserID).Scan(&unread); err != nil {
+		writeError(w, 500, "Failed to count notifications")
+		return
+	}
+	writeJSON(w, 200, map[string]int{"unread": unread})
+}
+
 func (s *Server) handleReadNotifications(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromContext(r.Context())
 	if sess == nil {

@@ -43,7 +43,11 @@ func (s *Server) RunNotifications(ctx context.Context) {
 }
 
 func (s *Server) notificationJob(ctx context.Context, lock int64, run func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	return s.advisoryJob(ctx, lock, 2*time.Minute, run)
+}
+
+func (s *Server) advisoryJob(ctx context.Context, lock int64, timeout time.Duration, run func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	connection, err := s.Users.DB.Acquire(ctx)
 	if err != nil {

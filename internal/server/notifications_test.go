@@ -14,7 +14,7 @@ import (
 
 func TestNotificationHandlersRequireSession(t *testing.T) {
 	api := &Server{}
-	for _, handler := range []http.HandlerFunc{api.handleListNotifications, api.handleReadNotifications, api.handleNotificationSettings} {
+	for _, handler := range []http.HandlerFunc{api.handleListNotifications, api.handleUnreadNotifications, api.handleReadNotifications, api.handleNotificationSettings} {
 		response := httptest.NewRecorder()
 		handler(response, httptest.NewRequest(http.MethodGet, "/", nil))
 		if response.Code != http.StatusUnauthorized {

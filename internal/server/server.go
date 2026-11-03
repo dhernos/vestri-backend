@@ -107,6 +107,7 @@ func (s *Server) Router() http.Handler {
 		pr.Use(s.requireSession(true))
 		s.registerMinecraftRoutes(pr)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/notifications"))).Get("/api/notifications", s.handleListNotifications)
+		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/notifications/unread"))).Get("/api/notifications/unread", s.handleUnreadNotifications)
 		pr.With(s.requireRoles(accessRoles(http.MethodGet, "/api/notifications/settings"))).Get("/api/notifications/settings", s.handleNotificationSettings)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/notifications/settings"))).Post("/api/notifications/settings", s.handleNotificationSettings)
 		pr.With(s.requireRoles(accessRoles(http.MethodPost, "/api/notifications/read"))).Post("/api/notifications/read", s.handleReadNotifications)

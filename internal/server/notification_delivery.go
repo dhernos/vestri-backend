@@ -4,12 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"yourapp/internal/i18n"
 )
+
+func (s *Server) notificationsActionURL(locale string) string {
+	return strings.TrimRight(s.Config.BaseURL, "/") + "/" + i18n.NormalizeLocale(locale) + "/notifications"
+}
 
 func notificationText(message notificationMessage, locale string) string {
 	if locale == "de" {
@@ -101,7 +106,8 @@ func (s *Server) deliverNextNotification(ctx context.Context) (bool, error) {
 			emailPending = false
 		} else if s.Mailer != nil {
 			deliveryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			err := s.Mailer.Send(deliveryCtx, address, "Vestri: "+message.Kind, text, "<p>"+html.EscapeString(text)+"</p>")
+			content := i18n.NotificationEmail(settings.Locale, message.Kind, message.ServerName, message.NodeName, message.CreatedAt.UTC().Format(time.RFC1123), s.notificationsActionURL(settings.Locale))
+			err := s.Mailer.Send(deliveryCtx, address, content.Subject, content.Text, content.HTML)
 			cancel()
 			if err == nil {
 				emailPending = false
