@@ -222,6 +222,33 @@ func (s *Server) handleTrackedPlugins(w http.ResponseWriter, r *http.Request) {
 	s.handlePluginOperation(w, r, "list")
 }
 
+func (worker pluginWorker) installedTargets(ctx context.Context, targets []auth.GameServer, plugin trackedPlugin) ([]auth.GameServer, error) {
+	filenames := append([]string{plugin.Installed.Filename}, plugin.Filenames...)
+	for _, filename := range filenames {
+		if !validPluginFilename(filename) {
+			return nil, fmt.Errorf("invalid tracked plugin filename")
+		}
+	}
+	installed := make([]auth.GameServer, 0, len(targets))
+	for _, target := range targets {
+		entries, err := worker.server.listSatisfactoryWorkerEntries(ctx, worker.baseURL, worker.apiKey, path.Join(target.RootPath, backendPluginsRelativePath))
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.Type == "file" && containsPluginFilename(filenames, entry.Name) {
+				installed = append(installed, target)
+				break
+			}
+		}
+	}
+	return installed, nil
+}
+
+func shouldCheckTrackedPlugin(plugin trackedPlugin, targetsChanged, force bool) bool {
+	return plugin.Source.Version == "" && (force || targetsChanged || time.Since(plugin.CheckedAt) >= pluginCheckInterval)
+}
+
 func (s *Server) handleImportPlugin(w http.ResponseWriter, r *http.Request) {
 	s.handlePluginOperation(w, r, "import")
 }
@@ -291,7 +318,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 				changed = true
 				continue
 			}
-			if !targetsChanged && time.Since(plugin.CheckedAt) < pluginCheckInterval {
+			if !shouldCheckTrackedPlugin(*plugin, targetsChanged, r.URL.Query().Get("force") == "true") {
 				continue
 			}
 			release, targetRefs, checkErr := latestPluginRelease(ctx, plugin.Source, compatibilityTargets)
@@ -387,6 +414,14 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	var deploymentTargets []auth.GameServer
+	if operation == "update" {
+		deploymentTargets, err = worker.installedTargets(ctx, pluginTargetsForRefs(targets, targetRefs), plugin)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to inspect installed plugins; no files were changed: "+err.Error())
+			return
+		}
+	}
 	plugin.CompatibilityTargets = compatibilityTargets
 	plugin.TargetRefs = targetRefs
 	plugin.GameVersion = ""
@@ -454,7 +489,7 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 	if operation == "update" {
-		for _, target := range pluginTargetsForRefs(targets, targetRefs) {
+		for _, target := range deploymentTargets {
 			if err := worker.replace(ctx, tempPath, path.Join(target.RootPath, backendPluginsRelativePath), release.Filename, plugin.Filenames); err != nil {
 				writeError(w, http.StatusBadGateway, "Plugin deployment partially completed; retry the update: "+err.Error())
 				return

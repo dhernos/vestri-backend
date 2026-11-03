@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -2427,6 +2428,20 @@ func parseTomlStringList(assignment string) []string {
 	return result
 }
 
+type minecraftForwardingSettingsError struct {
+	operation string
+	file      string
+	cause     error
+}
+
+func (failure *minecraftForwardingSettingsError) Error() string {
+	return "failed to " + failure.operation + " " + failure.file
+}
+
+func (failure *minecraftForwardingSettingsError) Unwrap() error {
+	return failure.cause
+}
+
 func (s *Server) applyVelocityBackendProxySettings(
 	ctx context.Context,
 	baseURL *url.URL,
@@ -2436,12 +2451,12 @@ func (s *Server) applyVelocityBackendProxySettings(
 	backendPropertiesPath := path.Join(rootPath, backendServerPropertiesRelative)
 	propertiesContent, _, err := s.workerReadFileOptional(ctx, baseURL, apiKey, backendPropertiesPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendServerPropertiesRelative, err}
 	}
 	propertiesContent = upsertJavaPropertiesValue(propertiesContent, "online-mode", "false")
 	propertiesContent = upsertJavaPropertiesValue(propertiesContent, "white-list", strconv.FormatBool(whitelistEnabled))
 	if err := s.workerWriteFile(ctx, baseURL, apiKey, backendPropertiesPath, propertiesContent); err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"write", backendServerPropertiesRelative, err}
 	}
 
 	normalizedSoftware := strings.ToUpper(strings.TrimSpace(softwareVersion))
@@ -2451,24 +2466,24 @@ func (s *Server) applyVelocityBackendProxySettings(
 	paperConfigPath := path.Join(rootPath, backendPaperGlobalRelative)
 	paperContent, paperMissing, err := s.workerReadFileOptional(ctx, baseURL, apiKey, paperConfigPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendPaperGlobalRelative, err}
 	}
 	if !paperMissing || needsPaperConfig {
 		paperContent = upsertPaperGlobalVelocitySettings(paperContent, forwardingSecret)
 		if err := s.workerWriteFile(ctx, baseURL, apiKey, paperConfigPath, paperContent); err != nil {
-			return err
+			return &minecraftForwardingSettingsError{"write", backendPaperGlobalRelative, err}
 		}
 	}
 
 	spigotConfigPath := path.Join(rootPath, backendSpigotConfigRelative)
 	spigotContent, spigotMissing, err := s.workerReadFileOptional(ctx, baseURL, apiKey, spigotConfigPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendSpigotConfigRelative, err}
 	}
 	if !spigotMissing || needsSpigotConfig {
 		spigotContent = upsertSpigotVelocitySettings(spigotContent, forwardingSecret)
 		if err := s.workerWriteFile(ctx, baseURL, apiKey, spigotConfigPath, spigotContent); err != nil {
-			return err
+			return &minecraftForwardingSettingsError{"write", backendSpigotConfigRelative, err}
 		}
 	}
 
@@ -3044,43 +3059,53 @@ func (s *Server) callWorkerJSON(ctx context.Context, baseURL *url.URL, apiKey, m
 
 	var (
 		bodyBytes []byte
-		body      io.Reader
 	)
 	if payload != nil {
 		bodyBytes, err = json.Marshal(payload)
 		if err != nil {
 			return 0, nil, err
 		}
-		body = bytes.NewReader(bodyBytes)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, targetURL.String(), body)
-	if err != nil {
-		return 0, nil, err
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, targetURL.String(), bytes.NewReader(bodyBytes))
+		if err != nil {
+			return 0, nil, err
+		}
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		nonce := strings.ReplaceAll(auth.NewSessionID(), "-", "")
+		signature := signWorkerRequest(apiKey, ts, nonce, method, signedPath)
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-Request-Timestamp", ts)
+		req.Header.Set("X-Request-Nonce", nonce)
+		req.Header.Set("X-Request-Signature", signature)
+
+		resp, err := workerHTTPClient.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxWorkerResponseBytes))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return 0, nil, readErr
+		}
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= 2 {
+			return resp.StatusCode, respBody, nil
+		}
+		delay := time.Second
+		if seconds, parseErr := strconv.Atoi(resp.Header.Get("Retry-After")); parseErr == nil && seconds >= 1 && seconds <= 30 {
+			delay = time.Duration(seconds) * time.Second
+		}
+		log.Printf("worker request throttled status=429 method=%s path=%q retry=%d delay=%s", method, pathname, attempt+1, delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	nonce := strings.ReplaceAll(auth.NewSessionID(), "-", "")
-	signature := signWorkerRequest(apiKey, ts, nonce, method, signedPath)
-
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("X-Request-Timestamp", ts)
-	req.Header.Set("X-Request-Nonce", nonce)
-	req.Header.Set("X-Request-Signature", signature)
-
-	resp, err := workerHTTPClient.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxWorkerResponseBytes))
-	if err != nil {
-		return 0, nil, err
-	}
-
-	return resp.StatusCode, respBody, nil
 }

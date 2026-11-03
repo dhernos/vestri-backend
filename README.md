@@ -78,8 +78,15 @@ only once per node.
 
 Use the tracked plugin's **Update** button to download a newer release into
 staging and deploy it to the selected Velocity proxy and its accessible linked
-Paper/Purpur servers, using the existing plugin manager's permissions and
-target scope. Restart those servers after updating to load the new JAR. Release
+Paper/Purpur servers **only where that plugin is already installed**, using the
+existing plugin manager's permissions and compatibility scope. Installation is
+identified by an exact tracked JAR filename (the installed filename or its saved
+filename history) in each server's `data/plugins` directory. Missing plugins,
+missing directories, and unrelated JARs are left alone; directory listing errors
+abort the update before any files change. Staging is still updated when no
+server currently has the plugin. Retry updates use the same presence check, so
+removing a plugin excludes that server from future updates. Manually renamed,
+untracked JARs are not recognized. Restart affected servers to load the new JAR. Release
 identity includes the asset's SHA256 digest, so replacing the asset under the
 mutable `latest` tag is detected even when its filename does not change. Normal
 tracked checks retain the existing six-hour interval. There is no background
