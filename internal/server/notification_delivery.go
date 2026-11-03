@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"yourapp/internal/i18n"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (s *Server) notificationsActionURL(locale string) string {
