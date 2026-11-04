@@ -85,7 +85,7 @@ func NotificationEmail(locale, kind, server, node, when, link string) EmailConte
 
 	body := "<p style=\"margin:0 0 12px;\"><span style=\"display:inline-block;padding:3px 10px;border-radius:999px;background:" + kindCopy.Color + ";color:#ffffff;font-size:12px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;\">" + html.EscapeString(kindCopy.Badge) + "</span></p>" +
 		"<p style=\"margin:0 0 12px;\">" + message + "</p>" +
-		"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" style=\"width:100%;border:1px solid #d8e2fb;border-radius:8px;margin:0 0 16px;\">" + rows + "</table>" +
+		"<table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" style=\"width:100%;border:1px solid #d8e2fb;border-radius:8px;margin:0 0 16px;\"><tbody>" + rows + "</tbody></table>" +
 		"<p style=\"margin:0 0 16px;\"><a href=\"" + html.EscapeString(link) + "\" style=\"display:inline-block;background:#4f6cf6;color:#f9fbff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600;\">" + html.EscapeString(t.Button) + "</a></p>" +
 		"<p style=\"margin:0;color:#5f6f95;font-size:13px;\">" + html.EscapeString(t.Settings) + "</p>"
 

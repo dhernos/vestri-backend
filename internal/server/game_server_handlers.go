@@ -1805,8 +1805,8 @@ func (s *Server) velocityServerHasBackends(ctx context.Context, nodeID, parentSe
 	return false, nil
 }
 
-func velocityBackendWhitelistEnabled(hasBackends bool) bool {
-	return !hasBackends
+func velocityBackendWhitelistEnabled(_ bool) bool {
+	return false
 }
 
 func generateForwardingSecret() (string, error) {

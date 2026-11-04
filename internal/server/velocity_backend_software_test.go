@@ -31,7 +31,7 @@ func TestVelocityBackendWhitelistPolicy(t *testing.T) {
 		hasBackends bool
 		want        string
 	}{
-		{name: "first backend is the entry point", want: "motd=Lobby\nwhite-list=true\n"},
+		{name: "first backend delegates whitelist to proxy", want: "motd=Lobby\nwhite-list=false\n"},
 		{name: "later backends do not enforce whitelist", hasBackends: true, want: "motd=Lobby\nwhite-list=false\n"},
 	}
 
