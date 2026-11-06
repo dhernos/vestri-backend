@@ -7,15 +7,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/redis/go-redis/v9"
 
 	"yourapp/internal/auth"
 	"yourapp/internal/config"
 	"yourapp/internal/email"
-
-	"github.com/go-webauthn/webauthn/webauthn"
-
-	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 type Server struct {
