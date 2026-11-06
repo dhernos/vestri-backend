@@ -1,0 +1,59 @@
+{
+  "id": "factorio",
+  "name": "Factorio Dedicated Server",
+  "description": "Headless Factorio server powered by factoriotools/factorio. Add the secrets USERNAME and TOKEN (factorio.com credentials) for mod updates and DLC.",
+  "game": "factorio",
+  "templateVersion": "1",
+  "versionConfig": {
+    "software": {
+      "label": "Release channel",
+      "defaultValue": "stable",
+      "options": ["stable", "latest"]
+    }
+  },
+  "composeInline": "services:\n  factorio:\n    image: factoriotools/factorio:{{SERVER_SOFTWARE}}\n    container_name: vestri-{{SERVER_SLUG}}\n    ports:\n      - \"34197:34197/udp\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n    volumes:\n      - ./data:/factorio\n    stdin_open: true\n    tty: true\n    restart: unless-stopped\n",
+  "configFiles": [
+    {
+      "id": "server-settings",
+      "title": "server-settings.json",
+      "path": "data/config/server-settings.json",
+      "format": "json"
+    },
+    {
+      "id": "map-gen-settings",
+      "title": "map-gen-settings.json",
+      "path": "data/config/map-gen-settings.json",
+      "format": "json"
+    },
+    {
+      "id": "map-settings",
+      "title": "map-settings.json",
+      "path": "data/config/map-settings.json",
+      "format": "json"
+    },
+    {
+      "id": "server-adminlist",
+      "title": "server-adminlist.json",
+      "path": "data/config/server-adminlist.json",
+      "format": "json"
+    },
+    {
+      "id": "server-whitelist",
+      "title": "server-whitelist.json",
+      "path": "data/config/server-whitelist.json",
+      "format": "json"
+    },
+    {
+      "id": "server-banlist",
+      "title": "server-banlist.json",
+      "path": "data/config/server-banlist.json",
+      "format": "json"
+    }
+  ],
+  "logLocations": [
+    {
+      "directory": "data",
+      "patterns": ["factorio-current.log", "factorio-previous.log"]
+    }
+  ]
+}

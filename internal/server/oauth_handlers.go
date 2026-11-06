@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 
@@ -20,6 +22,7 @@ import (
 
 const oauthStatePrefix = "oauth_state:"
 const oauthStateTTL = 10 * time.Minute
+const oauthStateCookieName = "oauth_state"
 const oauthPendingPrefix = "oauth_pending:"
 const oauthPendingTTL = 10 * time.Minute
 
@@ -39,6 +42,12 @@ type oauthUser struct {
 	Email  string
 	Name   string
 	Avatar string
+}
+
+type gitHubEmail struct {
+	Email    string `json:"email"`
+	Primary  bool   `json:"primary"`
+	Verified bool   `json:"verified"`
 }
 
 type oauthPendingLogin struct {
@@ -67,6 +76,15 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		s.oauthErrorRedirect(w, r, returnTo, "state_persist_failed")
 		return
 	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthStateCookieName,
+		Value:    state,
+		Path:     oauthCallbackPath(provider),
+		MaxAge:   int(oauthStateTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   s.Config.SessionCookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
 
 	authURL := s.buildAuthURL(provider, *cfg, state)
 	http.Redirect(w, r, authURL, http.StatusFound)
@@ -90,6 +108,13 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		s.oauthErrorRedirect(w, r, returnTo, "missing_state")
 		return
 	}
+	stateCookie, cookieErr := r.Cookie(oauthStateCookieName)
+	if cookieErr != nil || !oauthStateMatches(stateCookie.Value, stateParam) {
+		http.SetCookie(w, expiredOAuthStateCookie(provider, s.Config.SessionCookieSecure))
+		s.oauthErrorRedirect(w, r, returnTo, "state_invalid")
+		return
+	}
+	http.SetCookie(w, expiredOAuthStateCookie(provider, s.Config.SessionCookieSecure))
 
 	rawState, err := s.Redis.Get(r.Context(), oauthStatePrefix+stateParam).Bytes()
 	if err != nil {
@@ -100,7 +125,11 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	_ = s.Redis.Del(r.Context(), oauthStatePrefix+stateParam).Err()
 
 	var st oauthState
-	_ = json.Unmarshal(rawState, &st)
+	if err := json.Unmarshal(rawState, &st); err != nil {
+		log.Printf("oauth callback: state decode failed for provider %s: %v", provider, err)
+		s.oauthErrorRedirect(w, r, returnTo, "state_invalid")
+		return
+	}
 	returnTo = sanitizeReturnTo(st.ReturnTo)
 	if st.Provider != provider {
 		log.Printf("oauth callback: state mismatch expected %s got %s", st.Provider, provider)
@@ -125,6 +154,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		s.oauthErrorRedirect(w, r, returnTo, "email_required")
 		return
 	}
+	userInfo.Email = canonicalizeEmail(userInfo.Email)
 
 	ctx := r.Context()
 	ip := clientIP(r, s.trustedProxies)
@@ -343,19 +373,18 @@ func fetchGitHubUser(ctx context.Context, token string) (*oauthUser, error) {
 		ID        int64  `json:"id"`
 		Login     string `json:"login"`
 		Name      string `json:"name"`
-		Email     string `json:"email"`
 		AvatarURL string `json:"avatar_url"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	email := data.Email
-	if email == "" {
-		email, _ = fetchGitHubPrimaryEmail(ctx, token)
+	email, err := fetchGitHubPrimaryEmail(ctx, token)
+	if err != nil {
+		return nil, err
 	}
 	return &oauthUser{
 		ID:     fmt.Sprintf("%d", data.ID),
-		Email:  email,
+		Email:  canonicalizeEmail(email),
 		Name:   firstNonEmptyLocal(data.Name, data.Login),
 		Avatar: data.AvatarURL,
 	}, nil
@@ -370,23 +399,25 @@ func fetchGitHubPrimaryEmail(ctx context.Context, token string) (string, error) 
 		return "", err
 	}
 	defer resp.Body.Close()
-	var emails []struct {
-		Email    string `json:"email"`
-		Primary  bool   `json:"primary"`
-		Verified bool   `json:"verified"`
-	}
+	var emails []gitHubEmail
 	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
 		return "", err
 	}
-	for _, e := range emails {
-		if e.Primary && e.Verified {
-			return e.Email, nil
+	return selectVerifiedGitHubEmail(emails), nil
+}
+
+func selectVerifiedGitHubEmail(emails []gitHubEmail) string {
+	for _, email := range emails {
+		if email.Primary && email.Verified {
+			return canonicalizeEmail(email.Email)
 		}
 	}
-	if len(emails) > 0 {
-		return emails[0].Email, nil
-	}
-	return "", nil
+	return ""
+}
+
+func oauthStateMatches(cookieState, callbackState string) bool {
+	return cookieState != "" && callbackState != "" &&
+		subtle.ConstantTimeCompare([]byte(cookieState), []byte(callbackState)) == 1
 }
 
 func firstNonEmptyLocal(values ...string) string {
@@ -436,6 +467,15 @@ func (s *Server) handleOAuthTwoFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	locked, err := s.RateLimiter.Register2FAFailure(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Two-factor verification unavailable")
+		return
+	}
+	if locked {
+		writeError(w, http.StatusForbidden, "TWO_FACTOR_LOCKED")
+		return
+	}
 	if !s.verifyTwoFactor(r.Context(), user, req.Code) {
 		writeError(w, http.StatusForbidden, "INVALID_2FA_CODE")
 		return
@@ -497,6 +537,9 @@ func sanitizeReturnTo(raw string) string {
 	if raw == "" {
 		return "/"
 	}
+	if strings.ContainsRune(raw, '\\') || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
+		return "/"
+	}
 	if strings.HasPrefix(raw, "//") {
 		return "/"
 	}
@@ -516,6 +559,22 @@ func sanitizeReturnTo(raw string) string {
 		path = path + "?" + u.RawQuery
 	}
 	return path
+}
+
+func oauthCallbackPath(provider string) string {
+	return "/api/oauth/" + provider + "/callback"
+}
+
+func expiredOAuthStateCookie(provider string, secure bool) *http.Cookie {
+	return &http.Cookie{
+		Name:     oauthStateCookieName,
+		Value:    "",
+		Path:     oauthCallbackPath(provider),
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	}
 }
 
 func (s *Server) oauthChallengePath(returnTo string) string {

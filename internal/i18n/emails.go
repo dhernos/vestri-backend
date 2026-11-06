@@ -175,6 +175,10 @@ func renderTemplateHTML(tmpl string, values map[string]string) string {
 
 func wrapEmailHTML(locale, subject, bodyHTML string) string {
 	subtitle, footer := emailLayoutCopy(locale)
+	return renderEmailLayout(subject, subtitle, footer, bodyHTML)
+}
+
+func renderEmailLayout(subject, subtitle, footer, bodyHTML string) string {
 	return "<!doctype html>" +
 		"<html><body style=\"margin:0;padding:0;background:#eef3ff;\">" +
 		"<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#eef3ff;padding:24px 0;\"><tr><td align=\"center\">" +

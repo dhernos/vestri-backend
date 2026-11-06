@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -26,6 +27,7 @@ const (
 	maxWorkerResponseBytes = 8 << 20
 	maxRemoteComposeBytes  = 2 << 20
 	vanillaTemplateID      = "minecraft-vanilla"
+	curseForgeTemplateID   = "minecraft-curseforge"
 	defaultVelocityPort    = 25577
 	defaultMinecraftPort   = 25565
 	minecraftEULAConfigID  = "eula"
@@ -51,6 +53,7 @@ type createGameServerRequest struct {
 	AgreementAccepted bool   `json:"agreementAccepted"`
 	SoftwareVersion   string `json:"softwareVersion"`
 	GameVersion       string `json:"gameVersion"`
+	CurseForgeURL     string `json:"curseForgeUrl"`
 	ParentServerRef   string `json:"parentServerRef"`
 }
 
@@ -279,6 +282,14 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 
 	req.TemplateID = strings.TrimSpace(req.TemplateID)
 	req.ParentServerRef = strings.TrimSpace(req.ParentServerRef)
+	if req.ParentServerRef != "" {
+		unlock, lockErr := s.lockNodePlugins(r.Context(), node.ID)
+		if lockErr != nil {
+			writeError(w, http.StatusConflict, lockErr.Error())
+			return
+		}
+		defer unlock()
+	}
 	if req.TemplateID == "" {
 		writeError(w, http.StatusBadRequest, "templateId is required")
 		return
@@ -291,6 +302,17 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	}
 	if template == nil {
 		writeError(w, http.StatusNotFound, "Game server template not found")
+		return
+	}
+	curseForgeURL := ""
+	if template.ID == curseForgeTemplateID {
+		curseForgeURL, err = normalizeCurseForgeModpackURL(req.CurseForgeURL)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "A valid CurseForge modpack URL is required")
+			return
+		}
+	} else if strings.TrimSpace(req.CurseForgeURL) != "" {
+		writeError(w, http.StatusBadRequest, "CurseForge URL is only supported by the CurseForge modpack template")
 		return
 	}
 	template.VersionConfig = cloneTemplateVersions(template.VersionConfig)
@@ -334,6 +356,23 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		}
 		gameVersion = minecraftArtifact.Version
 	}
+	if template.ID == curseForgeTemplateID {
+		softwareVersion = "CURSEFORGE"
+	}
+	requestedKind := gameServerKindStandalone
+	if req.ParentServerRef != "" {
+		requestedKind = gameServerKindVelocityBackend
+	} else if isVelocityTemplate(template) {
+		requestedKind = gameServerKindVelocity
+	}
+	if needsVestriPlugin(softwareVersion, requestedKind) {
+		unlock, lockErr := s.lockNodePlugins(r.Context(), node.ID)
+		if lockErr != nil {
+			writeError(w, http.StatusConflict, lockErr.Error())
+			return
+		}
+		defer unlock()
+	}
 
 	composeTemplate, err := resolveMinecraftComposeTemplate(template)
 	if err != nil {
@@ -342,6 +381,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var parentServer *auth.GameServer
+	backendWhitelistEnabled := false
 	if req.ParentServerRef != "" {
 		parentAccess, findErr := s.Users.FindAccessibleGameServerByRefForNode(r.Context(), sess.UserID, node, req.ParentServerRef)
 		if findErr != nil {
@@ -361,6 +401,12 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		parentServer = &parentAccess.GameServer
+		hasBackends, backendsErr := s.velocityServerHasBackends(r.Context(), node.ID, parentServer.ID)
+		if backendsErr != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to check existing velocity backends")
+			return
+		}
+		backendWhitelistEnabled = velocityBackendWhitelistEnabled(hasBackends)
 	}
 
 	requestedName := strings.TrimSpace(req.Name)
@@ -401,6 +447,12 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		defer cancel()
 		_ = s.workerDeletePath(cleanupCtx, baseURL, apiKey, rootPath, true)
 	}()
+	if strings.EqualFold(strings.TrimSpace(template.Game), "satisfactory") {
+		if err := s.ensureSatisfactoryBlueprintDirectory(r.Context(), baseURL, apiKey, node.ID); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to prepare shared Satisfactory blueprint folder")
+			return
+		}
+	}
 
 	minecraftServerJarName := defaultMinecraftServerJarFile
 	if shouldProvisionMinecraftArtifact {
@@ -429,6 +481,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 		"MINECRAFT_SERVER_JAR_NAME":   minecraftServerJarName,
 		"MINECRAFT_JAVA_ARGS":         defaultMinecraftJavaArgs,
 		"MINECRAFT_SERVER_START_ARGS": minecraftServerStartArgs,
+		"CURSEFORGE_URL":              curseForgeURL,
 	}
 
 	metadata := gameServerStoredMetadata{
@@ -491,7 +544,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			renderValues["VELOCITY_FORWARDING_SECRET"] = forwardingSecret
 			metadata.Kind = gameServerKindVelocity
 			metadata.VelocityNetwork = velocityNetwork
-			metadata.ConnectPort = defaultVelocityPort
+			metadata.ConnectPort = defaultMinecraftPort
 		}
 
 		if isVelocityTemplate(template) {
@@ -534,6 +587,10 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	if err := s.ensureVestriPlugin(r.Context(), baseURL, apiKey, node.ID, rootPath, softwareVersion, metadata.Kind); err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
+		return
+	}
 
 	if parentServer != nil {
 		if err := ensureVelocityGroupStagingDirectory(r.Context(), s, baseURL, apiKey, parentServer.RootPath); err != nil {
@@ -568,6 +625,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 			rootPath,
 			softwareVersion,
 			forwardingSecret,
+			backendWhitelistEnabled,
 		); applyErr != nil {
 			writeError(w, http.StatusBadGateway, "Failed to configure backend server for velocity")
 			return
@@ -598,7 +656,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	serverRole := auth.NodeAccessOwner
 	if sess.UserID != node.OwnerUserID {
 		serverRole = auth.NodeAccessAdmin
-		if err := s.Users.UpsertGameServerGuest(r.Context(), created.ID, sess.UserID, serverRole); err != nil {
+		if err := s.Users.UpsertGameServerGuest(r.Context(), created.ID, sess.UserID, serverRole, sess.UserID); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to grant creator access to the game server")
 			return
 		}
@@ -754,6 +812,19 @@ func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	instances, err := s.Users.ListMinecraftInstances(r.Context(), node.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to resolve dynamic instance ownership")
+		return
+	}
+	for _, instance := range instances {
+		if instance.ServerID == server.ID {
+			chi.RouteContext(r.Context()).URLParams.Add("instanceId", server.ID)
+			s.handleDeleteMinecraftInstance(w, r)
+			return
+		}
+	}
+
 	if isVelocityServer(server) {
 		hasBackends, err := s.velocityServerHasBackends(r.Context(), node.ID, server.ID)
 		if err != nil {
@@ -792,7 +863,20 @@ func (s *Server) handleDeleteGameServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if supportsGameServerDatabases(server) {
+		if err := s.ensureNoGameServerDatabases(r.Context(), baseURL, apiKey, server); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
+
 	if parentVelocityServer != nil {
+		unlock, lockErr := s.lockNodePlugins(r.Context(), node.ID)
+		if lockErr != nil {
+			writeError(w, http.StatusConflict, lockErr.Error())
+			return
+		}
+		defer unlock()
 		if err := s.unregisterVelocityBackendFromProxy(r.Context(), baseURL, apiKey, parentVelocityServer, server.Slug); err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to update velocity server configuration")
 			return
@@ -833,6 +917,20 @@ func (s *Server) handleGameServerStackAction(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
+	}
+	metadata := parseGameServerMetadata(server.Metadata)
+	kind := resolvedGameServerKind(server, metadata)
+	if action == "up" && needsVestriPlugin(metadata.SoftwareVersion, kind) {
+		unlock, err := s.lockNodePlugins(r.Context(), node.ID)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		defer unlock()
+		if err := s.ensureVestriPlugin(r.Context(), baseURL, apiKey, node.ID, server.RootPath, metadata.SoftwareVersion, kind); err != nil {
+			writeError(w, http.StatusBadGateway, "Failed to install Vestri plugin: "+err.Error())
+			return
+		}
 	}
 
 	output, err := s.workerStackAction(r.Context(), baseURL, apiKey, action, server.StackName)
@@ -892,6 +990,27 @@ func (s *Server) loadNodeAndGameServerForRequest(w http.ResponseWriter, r *http.
 		return nil, nil, nil, "", false
 	}
 
+	if scoped, _ := r.Context().Value(minecraftResourceFilesScopeKey{}).(bool); scoped {
+		if !canManageNodeMinecraftLibrary(node.AccessRole) {
+			writeError(w, http.StatusForbidden, "Node owner or admin permission is required")
+			return nil, nil, nil, "", false
+		}
+		resource, err := s.Users.FindMinecraftResource(r.Context(), node.ID, chi.URLParam(r, "resourceId"))
+		if err != nil || resource == nil {
+			writeError(w, http.StatusNotFound, "Minecraft resource not found")
+			return nil, nil, nil, "", false
+		}
+		return sess, node, &auth.GameServer{RootPath: minecraftResourceDataPath(resource)}, node.AccessRole, true
+	}
+
+	if scoped, _ := r.Context().Value(nodeMinecraftFilesScopeKey{}).(bool); scoped {
+		if !canManageNodeMinecraftLibrary(node.AccessRole) {
+			writeError(w, http.StatusForbidden, "Node owner or admin permission is required to manage shared Minecraft files")
+			return nil, nil, nil, "", false
+		}
+		return sess, node, &auth.GameServer{RootPath: minecraftLibraryPath(node.ID)}, node.AccessRole, true
+	}
+
 	serverRef := strings.TrimSpace(chi.URLParam(r, "serverRef"))
 	if serverRef == "" {
 		writeError(w, http.StatusBadRequest, "serverRef is required")
@@ -906,6 +1025,18 @@ func (s *Server) loadNodeAndGameServerForRequest(w http.ResponseWriter, r *http.
 	if access == nil {
 		writeError(w, http.StatusNotFound, "Game server not found")
 		return nil, nil, nil, "", false
+	}
+
+	if groupFilesScoped(r.Context()) {
+		if !isVelocityServer(&access.GameServer) {
+			writeError(w, http.StatusBadRequest, "Plugin staging is only available for velocity servers")
+			return nil, nil, nil, "", false
+		}
+		if !canManageNodeMinecraftLibrary(node.AccessRole) {
+			writeError(w, http.StatusForbidden, "Node owner or admin permission is required to manage shared Minecraft files")
+			return nil, nil, nil, "", false
+		}
+		access.GameServer.RootPath = minecraftLibraryPath(node.ID)
 	}
 
 	return sess, node, &access.GameServer, access.AccessRole, true
@@ -970,10 +1101,15 @@ func buildGameServerResponse(
 	if connectPort == 0 {
 		switch kind {
 		case gameServerKindVelocity:
-			connectPort = defaultVelocityPort
+			connectPort = defaultMinecraftPort
 		case gameServerKindVelocityBackend:
 			connectPort = defaultMinecraftPort
 		}
+	}
+
+	configFiles := metadata.ConfigFiles
+	if isSatisfactoryBlueprintServer(srv.TemplateID) {
+		configFiles = withoutObsoleteSatisfactoryServerSettings(configFiles)
 	}
 
 	return gameServerResponse{
@@ -994,7 +1130,7 @@ func buildGameServerResponse(
 		ParentServerID:       strings.TrimSpace(metadata.ParentServerID),
 		ConnectHost:          strings.TrimSpace(metadata.ConnectHost),
 		ConnectPort:          connectPort,
-		ConfigFiles:          configFilesToResponse(metadata.ConfigFiles),
+		ConfigFiles:          configFilesToResponse(configFiles),
 		Status:               state,
 		StatusOutput:         statusOutput,
 		StatusError:          statusErr,
@@ -1050,11 +1186,14 @@ func isVelocityServer(server *auth.GameServer) bool {
 		return false
 	}
 	metadata := parseGameServerMetadata(server.Metadata)
-	kind := normalizeGameServerKindValue(metadata.Kind)
-	if kind == "" {
-		kind = inferGameServerKind(server, metadata)
+	return resolvedGameServerKind(server, metadata) == gameServerKindVelocity
+}
+
+func resolvedGameServerKind(server *auth.GameServer, metadata gameServerStoredMetadata) string {
+	if kind := normalizeGameServerKindValue(metadata.Kind); kind != "" {
+		return kind
 	}
-	return kind == gameServerKindVelocity
+	return inferGameServerKind(server, metadata)
 }
 
 func validateVelocityBackendTemplate(template *gameServerTemplate) error {
@@ -1161,8 +1300,8 @@ func buildVelocityBackendCompose(ctx context.Context, template *gameServerTempla
 		return "", err
 	}
 
-	out := stripComposeServicePorts(baseCompose, "minecraft")
-	out = ensureComposeServiceNetwork(out, "minecraft", "velocity")
+	out := stripComposeAllServicePorts(baseCompose)
+	out = ensureComposeAllServicesNetwork(out, "velocity")
 	out = ensureComposeExternalNetwork(out, "velocity", strings.TrimSpace(values["VELOCITY_NETWORK"]))
 	return ensureTextEndsWithNewline(out), nil
 }
@@ -1173,7 +1312,7 @@ func buildVelocityStandaloneCompose(ctx context.Context, template *gameServerTem
 		return "", err
 	}
 
-	out := setComposeServiceSinglePort(baseCompose, "minecraft", "25577:25577")
+	out := setComposeServiceSinglePort(baseCompose, "minecraft", fmt.Sprintf("%d:%d", defaultMinecraftPort, defaultVelocityPort))
 	out = ensureComposeServiceBindVolume(out, "minecraft", "./data:/server")
 	out = ensureComposeServiceEnvironmentValue(out, "minecraft", "TYPE", "VELOCITY")
 	out = ensureComposeServiceNetwork(out, "minecraft", "velocity")
@@ -1234,6 +1373,41 @@ func stripComposeServicePorts(content, serviceName string) string {
 		break
 	}
 	return strings.Join(lines, "\n")
+}
+
+func stripComposeAllServicePorts(content string) string {
+	serviceNames := composeServiceNames(content)
+	for i := len(serviceNames) - 1; i >= 0; i-- {
+		content = stripComposeServicePorts(content, serviceNames[i])
+	}
+	return content
+}
+
+func composeServiceNames(content string) []string {
+	lines := splitPreserveTrailingNewline(content)
+	servicesStart, servicesEnd, found := findComposeServicesBounds(lines)
+	if !found {
+		return nil
+	}
+
+	serviceNames := make([]string, 0)
+	for i := servicesStart + 1; i < servicesEnd; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || leadingWhitespaceWidth(lines[i]) != 2 {
+			continue
+		}
+		if strings.HasSuffix(trimmed, ":") {
+			serviceNames = append(serviceNames, strings.TrimSuffix(trimmed, ":"))
+		}
+	}
+	return serviceNames
+}
+
+func ensureComposeAllServicesNetwork(content, networkName string) string {
+	for _, serviceName := range composeServiceNames(content) {
+		content = ensureComposeServiceNetwork(content, serviceName, networkName)
+	}
+	return content
 }
 
 func ensureComposeServiceNetwork(content, serviceName, networkName string) string {
@@ -1565,29 +1739,8 @@ func findComposeServiceBounds(lines []string, serviceName string) (int, int, boo
 		return 0, 0, false
 	}
 
-	servicesStart := -1
-	servicesEnd := len(lines)
-	for i := range lines {
-		trimmed := strings.TrimSpace(lines[i])
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if leadingWhitespaceWidth(lines[i]) == 0 && trimmed == "services:" {
-			servicesStart = i
-			for j := i + 1; j < len(lines); j++ {
-				nextTrimmed := strings.TrimSpace(lines[j])
-				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
-					continue
-				}
-				if leadingWhitespaceWidth(lines[j]) == 0 {
-					servicesEnd = j
-					break
-				}
-			}
-			break
-		}
-	}
-	if servicesStart < 0 {
+	servicesStart, servicesEnd, found := findComposeServicesBounds(lines)
+	if !found {
 		return 0, 0, false
 	}
 
@@ -1617,6 +1770,32 @@ func findComposeServiceBounds(lines []string, serviceName string) (int, int, boo
 	return serviceStart, serviceEnd, true
 }
 
+func findComposeServicesBounds(lines []string) (int, int, bool) {
+	servicesStart := -1
+	servicesEnd := len(lines)
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if leadingWhitespaceWidth(lines[i]) == 0 && trimmed == "services:" {
+			servicesStart = i
+			for j := i + 1; j < len(lines); j++ {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "#") {
+					continue
+				}
+				if leadingWhitespaceWidth(lines[j]) == 0 {
+					servicesEnd = j
+					break
+				}
+			}
+			break
+		}
+	}
+	return servicesStart, servicesEnd, servicesStart >= 0
+}
+
 func (s *Server) velocityServerHasBackends(ctx context.Context, nodeID, parentServerID string) (bool, error) {
 	parentServerID = strings.TrimSpace(parentServerID)
 	if parentServerID == "" {
@@ -1635,6 +1814,10 @@ func (s *Server) velocityServerHasBackends(ctx context.Context, nodeID, parentSe
 		}
 	}
 	return false, nil
+}
+
+func velocityBackendWhitelistEnabled(_ bool) bool {
+	return false
 }
 
 func generateForwardingSecret() (string, error) {
@@ -2256,19 +2439,35 @@ func parseTomlStringList(assignment string) []string {
 	return result
 }
 
+type minecraftForwardingSettingsError struct {
+	operation string
+	file      string
+	cause     error
+}
+
+func (failure *minecraftForwardingSettingsError) Error() string {
+	return "failed to " + failure.operation + " " + failure.file
+}
+
+func (failure *minecraftForwardingSettingsError) Unwrap() error {
+	return failure.cause
+}
+
 func (s *Server) applyVelocityBackendProxySettings(
 	ctx context.Context,
 	baseURL *url.URL,
 	apiKey, rootPath, softwareVersion, forwardingSecret string,
+	whitelistEnabled bool,
 ) error {
 	backendPropertiesPath := path.Join(rootPath, backendServerPropertiesRelative)
 	propertiesContent, _, err := s.workerReadFileOptional(ctx, baseURL, apiKey, backendPropertiesPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendServerPropertiesRelative, err}
 	}
 	propertiesContent = upsertJavaPropertiesValue(propertiesContent, "online-mode", "false")
+	propertiesContent = upsertJavaPropertiesValue(propertiesContent, "white-list", strconv.FormatBool(whitelistEnabled))
 	if err := s.workerWriteFile(ctx, baseURL, apiKey, backendPropertiesPath, propertiesContent); err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"write", backendServerPropertiesRelative, err}
 	}
 
 	normalizedSoftware := strings.ToUpper(strings.TrimSpace(softwareVersion))
@@ -2278,24 +2477,24 @@ func (s *Server) applyVelocityBackendProxySettings(
 	paperConfigPath := path.Join(rootPath, backendPaperGlobalRelative)
 	paperContent, paperMissing, err := s.workerReadFileOptional(ctx, baseURL, apiKey, paperConfigPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendPaperGlobalRelative, err}
 	}
 	if !paperMissing || needsPaperConfig {
 		paperContent = upsertPaperGlobalVelocitySettings(paperContent, forwardingSecret)
 		if err := s.workerWriteFile(ctx, baseURL, apiKey, paperConfigPath, paperContent); err != nil {
-			return err
+			return &minecraftForwardingSettingsError{"write", backendPaperGlobalRelative, err}
 		}
 	}
 
 	spigotConfigPath := path.Join(rootPath, backendSpigotConfigRelative)
 	spigotContent, spigotMissing, err := s.workerReadFileOptional(ctx, baseURL, apiKey, spigotConfigPath)
 	if err != nil {
-		return err
+		return &minecraftForwardingSettingsError{"read", backendSpigotConfigRelative, err}
 	}
 	if !spigotMissing || needsSpigotConfig {
 		spigotContent = upsertSpigotVelocitySettings(spigotContent, forwardingSecret)
 		if err := s.workerWriteFile(ctx, baseURL, apiKey, spigotConfigPath, spigotContent); err != nil {
-			return err
+			return &minecraftForwardingSettingsError{"write", backendSpigotConfigRelative, err}
 		}
 	}
 
@@ -2667,6 +2866,9 @@ func (s *Server) cleanupGameServerOnWorker(ctx context.Context, baseURL *url.URL
 	_, _ = s.workerStackAction(ctx, baseURL, apiKey, "down", server.StackName)
 
 	paths := uniqueCleanupPaths(server.RootPath, server.StackName)
+	if strings.TrimSpace(server.ID) != "" {
+		paths = append(paths, gameServerSecretsFilePath(server))
+	}
 	for _, targetPath := range paths {
 		if err := s.workerDeletePath(ctx, baseURL, apiKey, targetPath, true); err != nil {
 			return err
@@ -2832,16 +3034,15 @@ func (s *Server) workerStackStatus(ctx context.Context, baseURL *url.URL, apiKey
 	return deriveGameServerState(output), output, nil
 }
 
+// Case-sensitive on purpose: compose prints "Up 3 minutes" in the status column, while names/images are lowercase.
+var composeUpStatusPattern = regexp.MustCompile(`\bUp\b|\brunning\b`)
+
 func deriveGameServerState(output string) string {
-	lower := strings.ToLower(strings.TrimSpace(output))
-	if lower == "" {
+	if strings.TrimSpace(output) == "" {
 		return "down"
 	}
-	if strings.Contains(lower, "running") || strings.Contains(lower, "up") {
+	if composeUpStatusPattern.MatchString(output) {
 		return "up"
-	}
-	if strings.Contains(lower, "exited") || strings.Contains(lower, "dead") || strings.Contains(lower, "created") {
-		return "down"
 	}
 	return "down"
 }
@@ -2869,43 +3070,53 @@ func (s *Server) callWorkerJSON(ctx context.Context, baseURL *url.URL, apiKey, m
 
 	var (
 		bodyBytes []byte
-		body      io.Reader
 	)
 	if payload != nil {
 		bodyBytes, err = json.Marshal(payload)
 		if err != nil {
 			return 0, nil, err
 		}
-		body = bytes.NewReader(bodyBytes)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, targetURL.String(), body)
-	if err != nil {
-		return 0, nil, err
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, targetURL.String(), bytes.NewReader(bodyBytes))
+		if err != nil {
+			return 0, nil, err
+		}
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		nonce := strings.ReplaceAll(auth.NewSessionID(), "-", "")
+		signature := signWorkerRequest(apiKey, ts, nonce, method, signedPath)
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("X-Request-Timestamp", ts)
+		req.Header.Set("X-Request-Nonce", nonce)
+		req.Header.Set("X-Request-Signature", signature)
+
+		resp, err := workerHTTPClient.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxWorkerResponseBytes))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return 0, nil, readErr
+		}
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= 2 {
+			return resp.StatusCode, respBody, nil
+		}
+		delay := time.Second
+		if seconds, parseErr := strconv.Atoi(resp.Header.Get("Retry-After")); parseErr == nil && seconds >= 1 && seconds <= 30 {
+			delay = time.Duration(seconds) * time.Second
+		}
+		log.Printf("worker request throttled status=429 method=%s path=%q retry=%d delay=%s", method, pathname, attempt+1, delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	nonce := strings.ReplaceAll(auth.NewSessionID(), "-", "")
-	signature := signWorkerRequest(apiKey, ts, nonce, method, signedPath)
-
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("X-Request-Timestamp", ts)
-	req.Header.Set("X-Request-Nonce", nonce)
-	req.Header.Set("X-Request-Signature", signature)
-
-	resp, err := workerHTTPClient.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxWorkerResponseBytes))
-	if err != nil {
-		return 0, nil, err
-	}
-
-	return resp.StatusCode, respBody, nil
 }

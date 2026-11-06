@@ -173,8 +173,46 @@ func (s *Server) handleListGameServerGuests(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (s *Server) handleUpdateGameServerGuest(w http.ResponseWriter, r *http.Request) {
+	sess, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
+	if !ok {
+		return
+	}
+	if !canManageGameServerInvites(serverRole) {
+		writeError(w, http.StatusForbidden, "You cannot change guests for this game server")
+		return
+	}
+	guestUserID := strings.TrimSpace(chi.URLParam(r, "guestUserId"))
+	if guestUserID == "" || guestUserID == node.OwnerUserID {
+		writeError(w, http.StatusBadRequest, "A non-owner guestUserId is required")
+		return
+	}
+	var request struct {
+		Permission string `json:"permission"`
+	}
+	if decodeJSON(r, &request) != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	permission, valid := normalizeNodePermission(request.Permission)
+	if !valid {
+		writeError(w, http.StatusBadRequest, "Invalid server permission")
+		return
+	}
+	updated, err := s.Users.UpdateGameServerGuestPermission(r.Context(), server.ID, guestUserID, permission, sess.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to update guest")
+		return
+	}
+	if !updated {
+		writeError(w, http.StatusNotFound, "Guest not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (s *Server) handleRemoveGameServerGuest(w http.ResponseWriter, r *http.Request) {
-	_, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
+	sess, node, server, serverRole, ok := s.loadNodeAndGameServerForRequest(w, r)
 	if !ok {
 		return
 	}
@@ -193,7 +231,7 @@ func (s *Server) handleRemoveGameServerGuest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	removed, err := s.Users.RemoveGameServerGuest(r.Context(), server.ID, guestUserID)
+	removed, err := s.Users.RemoveGameServerGuest(r.Context(), server.ID, guestUserID, sess.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to remove guest")
 		return

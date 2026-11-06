@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,8 +19,9 @@ import (
 )
 
 type writeGameServerFileRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	Exclusive bool   `json:"exclusive,omitempty"`
 }
 
 type deleteGameServerFileRequest struct {
@@ -150,7 +152,8 @@ func (s *Server) handleReadGameServerFile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !isTextFilePath(fullPath) {
+	compressedLog := isCompressedServerLogPath(gameServerLogLocations(server), server.RootPath, fullPath)
+	if !isTextFilePath(fullPath) && !compressedLog {
 		writeError(w, http.StatusUnsupportedMediaType, "Only text file formats can be opened in editor")
 		return
 	}
@@ -169,6 +172,17 @@ func (s *Server) handleReadGameServerFile(w http.ResponseWriter, r *http.Request
 	if statusCode < 200 || statusCode >= 300 {
 		http.Error(w, strings.TrimSpace(string(body)), statusCode)
 		return
+	}
+	if compressedLog {
+		body, err = decompressServerLog(body)
+		if err != nil {
+			if errors.Is(err, errServerLogTooLarge) {
+				writeError(w, http.StatusRequestEntityTooLarge, "Decompressed log exceeds the maximum size")
+				return
+			}
+			writeError(w, http.StatusUnprocessableEntity, "Invalid compressed log file")
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -202,6 +216,27 @@ func (s *Server) handleWriteGameServerFile(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Worker node configuration is invalid")
 		return
+	}
+
+	if req.Exclusive {
+		code, body, listErr := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/list?path="+url.QueryEscape(path.Dir(fullPath)), nil)
+		if listErr != nil || (code != http.StatusOK && code != http.StatusNotFound) {
+			writeError(w, http.StatusBadGateway, "Failed to check new file path")
+			return
+		}
+		if code == http.StatusOK {
+			var entries []satisfactoryWorkerEntry
+			if json.Unmarshal(body, &entries) != nil {
+				writeError(w, http.StatusBadGateway, "Invalid worker directory response")
+				return
+			}
+			for _, entry := range entries {
+				if entry.Name == path.Base(fullPath) {
+					writeError(w, http.StatusConflict, "A file or folder already exists at this path")
+					return
+				}
+			}
+		}
 	}
 
 	statusCode, body, err := s.callWorkerJSON(r.Context(), baseURL, apiKey, http.MethodPost, "/fs/write", map[string]string{
@@ -335,35 +370,37 @@ func (s *Server) handleDownloadGameServerFile(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	query := url.Values{"path": {fullPath}}.Encode()
-	resp, err := s.callWorkerStream(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/download", query, "", nil)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "Worker request failed")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		copyHeaders(w.Header(), resp.Header, []string{
-			"Content-Type",
-			"Content-Encoding",
-			"Content-Disposition",
-			"Content-Length",
-			"Content-Range",
-			"Accept-Ranges",
-		})
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-		return
-	}
-
-	workerErr := readWorkerErrorText(resp.Body)
-	if !isDirectoryDownloadError(resp.StatusCode, workerErr) {
-		if workerErr == "" {
-			workerErr = "Worker request failed"
+	if r.URL.Query().Get("archive") != "zip" {
+		query := url.Values{"path": {fullPath}}.Encode()
+		resp, err := s.callWorkerStream(r.Context(), baseURL, apiKey, http.MethodGet, "/fs/download", query, "", nil)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "Worker request failed")
+			return
 		}
-		http.Error(w, workerErr, resp.StatusCode)
-		return
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			copyHeaders(w.Header(), resp.Header, []string{
+				"Content-Type",
+				"Content-Encoding",
+				"Content-Disposition",
+				"Content-Length",
+				"Content-Range",
+				"Accept-Ranges",
+			})
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+			return
+		}
+
+		workerErr := readWorkerErrorText(resp.Body)
+		if !isDirectoryDownloadError(resp.StatusCode, workerErr) {
+			if workerErr == "" {
+				workerErr = "Worker request failed"
+			}
+			http.Error(w, workerErr, resp.StatusCode)
+			return
+		}
 	}
 
 	sourceName := path.Base(fullPath)
@@ -425,6 +462,8 @@ func (s *Server) handleUploadGameServerFile(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusForbidden, "Server permission denied for file upload")
 		return
 	}
+
+	extendUploadDeadlines(w)
 
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -573,6 +612,14 @@ func (s *Server) handleUploadGameServerFile(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// extendUploadDeadlines lifts the global 5 minute Read/WriteTimeout, which would cut off large or slow uploads.
+func extendUploadDeadlines(w http.ResponseWriter) {
+	controller := http.NewResponseController(w)
+	deadline := time.Now().Add(30 * time.Minute)
+	_ = controller.SetReadDeadline(deadline)
+	_ = controller.SetWriteDeadline(deadline)
 }
 
 func resolveServerScopedPath(rootPath, rawPath string, allowRoot bool) (string, error) {

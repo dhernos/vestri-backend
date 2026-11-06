@@ -1,0 +1,25 @@
+name: Build container
+on:
+  push:
+    branches: [main, dev]
+
+jobs:
+  build:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+
+      - uses: https://github.com/docker/setup-buildx-action@v3
+
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: git.lwsnr.com
+          username: ${{ forgejo.actor }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - uses: https://github.com/docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            git.lwsnr.com/${{ forgejo.repository }}:${{ forgejo.ref_name == 'main' && 'latest' || 'dev' }}

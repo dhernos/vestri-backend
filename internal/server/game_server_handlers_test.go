@@ -5,6 +5,36 @@ import (
 	"testing"
 )
 
+func TestSatisfactoryTemplateDoesNotExposeObsoleteServerSettingsINI(t *testing.T) {
+	t.Parallel()
+
+	template, err := gameServerTemplateByID("satisfactory-dedicated")
+	if err != nil {
+		t.Fatalf("gameServerTemplateByID() error = %v", err)
+	}
+	if template == nil {
+		t.Fatal("Satisfactory template not found")
+	}
+	if template.TemplateVersion != "2" {
+		t.Fatalf("template version = %q, want 2", template.TemplateVersion)
+	}
+	if len(template.ConfigFiles) != 0 {
+		t.Fatalf("Satisfactory config files = %#v, want none", template.ConfigFiles)
+	}
+}
+
+func TestWithoutObsoleteSatisfactoryServerSettings(t *testing.T) {
+	t.Parallel()
+
+	configs := withoutObsoleteSatisfactoryServerSettings([]gameServerTemplateConfigFile{
+		{ID: "server-settings", Path: "data/FactoryGame/Saved/Config/LinuxServer/ServerSettings.ini"},
+		{ID: "engine", Path: "data/gamefiles/FactoryGame/Saved/Config/LinuxServer/Engine.ini"},
+	})
+	if len(configs) != 1 || configs[0].ID != "engine" {
+		t.Fatalf("filtered config files = %#v", configs)
+	}
+}
+
 func TestParseWorkerImageStatus(t *testing.T) {
 	t.Parallel()
 

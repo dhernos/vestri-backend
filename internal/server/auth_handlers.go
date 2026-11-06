@@ -27,6 +27,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	req.Email = canonicalizeEmail(req.Email)
 
 	if !validateEmail(req.Email) {
 		writeError(w, http.StatusBadRequest, "Invalid email format")
@@ -228,6 +229,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	req.Email = canonicalizeEmail(req.Email)
 	passwordForCompare, _, err := normalizeTransportPassword(req.Password, req.PasswordFormat)
 	if !validateEmail(req.Email) || err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid credentials")
@@ -270,12 +272,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		locked, err := s.RateLimiter.Register2FAFailure(ctx, user.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Two-factor verification unavailable")
+			return
+		}
+		if locked {
+			writeError(w, http.StatusForbidden, "TWO_FACTOR_LOCKED")
+			return
+		}
 		if !s.verifyTwoFactor(ctx, user, req.Code) {
-			locked, _ := s.RateLimiter.Register2FAFailure(ctx, user.ID)
-			if locked {
-				writeError(w, http.StatusForbidden, "TWO_FACTOR_LOCKED")
-				return
-			}
 			writeError(w, http.StatusForbidden, "INVALID_2FA_CODE")
 			return
 		}

@@ -324,8 +324,16 @@ func (r *UserRepository) ListGameServerGuests(ctx context.Context, serverID stri
 	return guests, rows.Err()
 }
 
-func (r *UserRepository) RemoveGameServerGuest(ctx context.Context, serverID, userID string) (bool, error) {
-	tag, err := r.DB.Exec(ctx, `
+func (r *UserRepository) RemoveGameServerGuest(ctx context.Context, serverID, userID string, actorIDs ...string) (bool, error) {
+	tx, err := r.DB.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := setGameServerNotificationActor(ctx, tx, actorIDs); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `
 		DELETE FROM "GameServerGuest"
 		WHERE "serverId"=$1
 		  AND "userId"=$2
@@ -333,17 +341,53 @@ func (r *UserRepository) RemoveGameServerGuest(ctx context.Context, serverID, us
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() > 0, nil
+	return tag.RowsAffected() > 0, tx.Commit(ctx)
 }
 
-func (r *UserRepository) UpsertGameServerGuest(ctx context.Context, serverID, userID, permission string) error {
-	_, err := r.DB.Exec(ctx, `
+func setGameServerNotificationActor(ctx context.Context, tx pgx.Tx, actorIDs []string) error {
+	actorID := ""
+	if len(actorIDs) > 0 {
+		actorID = actorIDs[0]
+	}
+	_, err := tx.Exec(ctx, `SELECT set_config('vestri.notification_actor', $1, TRUE)`, actorID)
+	return err
+}
+
+func (r *UserRepository) UpdateGameServerGuestPermission(ctx context.Context, serverID, userID, permission, actorID string) (bool, error) {
+	tx, err := r.DB.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := setGameServerNotificationActor(ctx, tx, []string{actorID}); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE "GameServerGuest" SET "permission"=$3 WHERE "serverId"=$1 AND "userId"=$2`, serverID, userID, permission)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, tx.Commit(ctx)
+}
+
+func (r *UserRepository) UpsertGameServerGuest(ctx context.Context, serverID, userID, permission string, actorIDs ...string) error {
+	tx, err := r.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := setGameServerNotificationActor(ctx, tx, actorIDs); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO "GameServerGuest" ("id","serverId","userId","permission")
 		VALUES ($1,$2,$3,$4)
 		ON CONFLICT ("serverId","userId")
 		DO UPDATE SET "permission"=EXCLUDED."permission"
 	`, uuid.NewString(), serverID, userID, permission)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *UserRepository) AcceptGameServerInvite(ctx context.Context, inviteID, userID, email string) (*GameServerInvite, error) {
@@ -412,6 +456,10 @@ func (r *UserRepository) AcceptGameServerInvite(ctx context.Context, inviteID, u
 
 	if acceptedAt.Valid || invite.ExpiresAt.Before(time.Now()) {
 		return nil, nil
+	}
+
+	if err := setGameServerNotificationActor(ctx, tx, []string{invite.InviterUser}); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()

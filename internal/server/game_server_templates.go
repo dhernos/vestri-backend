@@ -25,8 +25,16 @@ type gameServerTemplate struct {
 	ComposeInline   string                         `json:"composeInline,omitempty"`
 	ComposeURL      string                         `json:"composeUrl,omitempty"`
 	ConfigFiles     []gameServerTemplateConfigFile `json:"configFiles"`
+	LogLocations    []gameServerTemplateLogLocation `json:"logLocations,omitempty"`
 	Agreement       *gameServerTemplateAgreement   `json:"agreement,omitempty"`
 	VersionConfig   *gameServerTemplateVersions    `json:"versionConfig,omitempty"`
+}
+
+// gameServerTemplateLogLocation is a directory relative to the server root whose
+// matching files are offered as historical logs.
+type gameServerTemplateLogLocation struct {
+	Directory string   `json:"directory"`
+	Patterns  []string `json:"patterns,omitempty"`
 }
 
 type gameServerTemplateConfigFile struct {
@@ -67,16 +75,17 @@ type gameServerTemplateVersionField struct {
 }
 
 type gameServerStoredMetadata struct {
-	TemplateName    string                         `json:"templateName"`
-	Game            string                         `json:"game"`
-	ConfigFiles     []gameServerTemplateConfigFile `json:"configFiles"`
-	SoftwareVersion string                         `json:"softwareVersion,omitempty"`
-	GameVersion     string                         `json:"gameVersion,omitempty"`
-	Kind            string                         `json:"kind,omitempty"`
-	ParentServerID  string                         `json:"parentServerId,omitempty"`
-	VelocityNetwork string                         `json:"velocityNetwork,omitempty"`
-	ConnectHost     string                         `json:"connectHost,omitempty"`
-	ConnectPort     int                            `json:"connectPort,omitempty"`
+	TemplateName       string                         `json:"templateName"`
+	Game               string                         `json:"game"`
+	ConfigFiles        []gameServerTemplateConfigFile `json:"configFiles"`
+	SoftwareVersion    string                         `json:"softwareVersion,omitempty"`
+	GameVersion        string                         `json:"gameVersion,omitempty"`
+	Kind               string                         `json:"kind,omitempty"`
+	ParentServerID     string                         `json:"parentServerId,omitempty"`
+	VelocityNetwork    string                         `json:"velocityNetwork,omitempty"`
+	VelocityServerName string                         `json:"velocityServerName,omitempty"`
+	ConnectHost        string                         `json:"connectHost,omitempty"`
+	ConnectPort        int                            `json:"connectPort,omitempty"`
 }
 
 var (
@@ -231,7 +240,51 @@ func normalizeGameServerTemplate(tpl *gameServerTemplate) error {
 	}
 
 	tpl.ConfigFiles = normalizedConfigFiles
+
+	logLocations, err := normalizeTemplateLogLocations(tpl.LogLocations)
+	if err != nil {
+		return err
+	}
+	tpl.LogLocations = logLocations
 	return nil
+}
+
+func normalizeTemplateLogLocations(values []gameServerTemplateLogLocation) ([]gameServerTemplateLogLocation, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	result := make([]gameServerTemplateLogLocation, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, location := range values {
+		directory := normalizeTemplatePath(location.Directory)
+		if directory == ".." || !isSafeTemplateRelativePath(directory) {
+			return nil, fmt.Errorf("invalid log directory: %s", location.Directory)
+		}
+		if _, exists := seen[directory]; exists {
+			return nil, fmt.Errorf("duplicate log directory: %s", directory)
+		}
+		seen[directory] = struct{}{}
+
+		patterns := make([]string, 0, len(location.Patterns))
+		for _, pattern := range location.Patterns {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			if strings.ContainsAny(pattern, `/\`) {
+				return nil, fmt.Errorf("log pattern must not contain path separators: %s", pattern)
+			}
+			if _, err := path.Match(pattern, ""); err != nil {
+				return nil, fmt.Errorf("invalid log pattern %q: %w", pattern, err)
+			}
+			patterns = append(patterns, pattern)
+		}
+		if len(patterns) == 0 {
+			patterns = []string{"*.log", "*.log.gz"}
+		}
+		result = append(result, gameServerTemplateLogLocation{Directory: directory, Patterns: patterns})
+	}
+	return result, nil
 }
 
 func normalizeTemplateAgreement(value *gameServerTemplateAgreement) (*gameServerTemplateAgreement, error) {
@@ -408,6 +461,17 @@ func configFilesToResponse(values []gameServerTemplateConfigFile) []gameServerCo
 			Path:   cfg.Path,
 			Format: cfg.Format,
 		})
+	}
+	return result
+}
+
+func withoutObsoleteSatisfactoryServerSettings(values []gameServerTemplateConfigFile) []gameServerTemplateConfigFile {
+	result := make([]gameServerTemplateConfigFile, 0, len(values))
+	for _, cfg := range values {
+		if cfg.ID == "server-settings" && cfg.Path == "data/FactoryGame/Saved/Config/LinuxServer/ServerSettings.ini" {
+			continue
+		}
+		result = append(result, cfg)
 	}
 	return result
 }
