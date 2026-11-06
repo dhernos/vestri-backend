@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"mime"
+	"mime/quotedprintable"
 	"net"
 	"net/smtp"
 	"strings"
@@ -26,17 +28,26 @@ func (s *Sender) Send(ctx context.Context, to, subject, text, html string) error
 	}
 
 	body := html
+	contentType := "text/html"
 	if strings.TrimSpace(body) == "" {
 		body = text
+		contentType = "text/plain"
 	}
 
 	var msg strings.Builder
 	msg.WriteString(fmt.Sprintf("From: %s\r\n", s.cfg.From))
 	msg.WriteString(fmt.Sprintf("To: %s\r\n", to))
-	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", mime.QEncoding.Encode("UTF-8", subject)))
 	msg.WriteString("MIME-Version: 1.0\r\n")
-	msg.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n\r\n")
-	msg.WriteString(body)
+	msg.WriteString(fmt.Sprintf("Content-Type: %s; charset=\"UTF-8\"\r\n", contentType))
+	msg.WriteString("Content-Transfer-Encoding: quoted-printable\r\n\r\n")
+	encoder := quotedprintable.NewWriter(&msg)
+	if _, err := encoder.Write([]byte(body)); err != nil {
+		return err
+	}
+	if err := encoder.Close(); err != nil {
+		return err
+	}
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
 	dialer := &net.Dialer{Timeout: 10 * time.Second}

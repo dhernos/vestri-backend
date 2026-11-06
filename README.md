@@ -116,8 +116,39 @@ They create an isolated schema, apply and roll back/reapply actual migrations,
 exercise concurrent retention, recipient/actor/preferences correctness, recovery
 pairing, role authorization and deletion isolation, then drop the test schema.
 
+Velocity plugin data-path and worker HTTP regressions run with
+`go test ./internal/server -run TestVelocityPluginData -count=1`.
+To include real player GET/POST and dynamic manifest synchronization checks,
+set `VESTRI_VELOCITY_TEST_DATABASE_URL` to a disposable PostgreSQL URL. These
+checks apply migrations in an isolated schema and drop it after the test.
+
 Velocity dynamic-server plugin setup and console commands:
 https://github.com/dhernos/vestri-plugin
+
+## Velocity Plugin Data Directory
+
+The backend writes the dynamic-server manifest and player policy, and reads
+the player journal, under `<proxy root>/data/plugins/vestri-dynamic/`, matching
+Velocity's official plugin data directory. The plugin owns startup migration;
+the backend does not move or delete plugin data.
+
+Path selection uses read-only worker directory listings on each operation:
+
+- A config (`vestri-dynamic-config.json`) or journal (`vestri-players.json`)
+  in the official directory selects that directory, even if stale root files
+  remain.
+- Otherwise, any legacy config, manifest, owned-server registry, journal,
+  policy, or `vestri-player-logs` entry directly under `<proxy root>/data/`
+  keeps reads and writes there for compatibility with older plugins. An empty
+  or manifest-only official directory does not override legacy evidence.
+- With no legacy evidence, the official directory is used, including before
+  the plugin's first startup. Worker writes create missing parent directories.
+- Listing failures abort the operation rather than guessing a write target.
+
+This avoids precreating the official data directory while legacy data still
+awaits migration. Manifest synchronization and player management resolve the
+directory independently on each operation, so later plugin migration is picked
+up without restarting the backend.
 
 ## Automatic Paper and Velocity Plugin Installation
 

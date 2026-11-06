@@ -426,7 +426,11 @@ func (s *Server) syncMinecraftProxy(ctx context.Context, worker pluginWorker, no
 	if err != nil {
 		return err
 	}
-	if err = s.workerWriteFile(ctx, worker.baseURL, worker.apiKey, path.Join(parent.RootPath, "data/vestri-dynamic-servers.json"), string(manifest)); err != nil {
+	dataDirectory, err := s.velocityPluginDataDirectory(ctx, worker.baseURL, worker.apiKey, parent.RootPath)
+	if err != nil {
+		return err
+	}
+	if err = s.workerWriteFile(ctx, worker.baseURL, worker.apiKey, path.Join(dataDirectory, "vestri-dynamic-servers.json"), string(manifest)); err != nil {
 		return err
 	}
 	return reloadMinecraftProxyWorker(ctx, worker, nodeID, parent)

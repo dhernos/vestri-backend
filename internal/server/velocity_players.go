@@ -109,7 +109,12 @@ func (s *Server) handleVelocityPlayers(w http.ResponseWriter, r *http.Request) {
 	}
 	velocityWhitelistMu.Lock()
 	defer velocityWhitelistMu.Unlock()
-	policyPath := path.Join(proxy.RootPath, "data/vestri-player-policy.json")
+	dataDirectory, err := s.velocityPluginDataDirectory(r.Context(), baseURL, apiKey, proxy.RootPath)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to locate proxy plugin data")
+		return
+	}
+	policyPath := path.Join(dataDirectory, "vestri-player-policy.json")
 	content, missing, err := s.workerReadFileOptional(r.Context(), baseURL, apiKey, policyPath)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to read proxy player policy")
@@ -165,7 +170,7 @@ func (s *Server) handleVelocityPlayers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	journal, absent, err := s.workerReadFileOptional(r.Context(), baseURL, apiKey, path.Join(proxy.RootPath, "data/vestri-players.json"))
+	journal, absent, err := s.workerReadFileOptional(r.Context(), baseURL, apiKey, path.Join(dataDirectory, "vestri-players.json"))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to read player journal")
 		return
