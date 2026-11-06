@@ -645,7 +645,7 @@ func (s *Server) handleCreateGameServer(w http.ResponseWriter, r *http.Request) 
 	serverRole := auth.NodeAccessOwner
 	if sess.UserID != node.OwnerUserID {
 		serverRole = auth.NodeAccessAdmin
-		if err := s.Users.UpsertGameServerGuest(r.Context(), created.ID, sess.UserID, serverRole); err != nil {
+		if err := s.Users.UpsertGameServerGuest(r.Context(), created.ID, sess.UserID, serverRole, sess.UserID); err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to grant creator access to the game server")
 			return
 		}

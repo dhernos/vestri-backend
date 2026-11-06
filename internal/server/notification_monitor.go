@@ -179,7 +179,7 @@ func (s *Server) recordNotificationHealth(ctx context.Context, node *auth.Worker
 	if kind == "server_down" && !wasHealthy {
 		unhealthy = false
 	}
-	next, emit := advanceNotificationFailure(previous, unhealthy, time.Now())
+	next, emit, recover := advanceNotificationHealth(previous, unhealthy, healthy, time.Now())
 	var nextSince *time.Time
 	if !next.Since.IsZero() {
 		nextSince = &next.Since
@@ -188,8 +188,13 @@ func (s *Server) recordNotificationHealth(ctx context.Context, node *auth.Worker
 		return err
 	}
 	if emit {
-		if _, err := tx.Exec(ctx, `SELECT vestri_notify($1,$2,$3,$4,$5)`, kind, node.ID, node.Name, serverID, serverName); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT vestri_notify_health($1,$2,$3,$4,$5)`, kind, node.ID, node.Name, serverID, serverName); err != nil {
 			return fmt.Errorf("persist health notification: %w", err)
+		}
+	}
+	if recover {
+		if _, err := tx.Exec(ctx, `SELECT vestri_notify_recovery($1,$2,$3,$4,$5)`, kind, node.ID, node.Name, serverID, serverName); err != nil {
+			return fmt.Errorf("persist recovery notification: %w", err)
 		}
 	}
 	return tx.Commit(ctx)

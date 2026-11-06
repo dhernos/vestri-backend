@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -18,27 +17,8 @@ func (s *Server) notificationsActionURL(locale string) string {
 }
 
 func notificationText(message notificationMessage, locale string) string {
-	if locale == "de" {
-		switch message.Kind {
-		case "server_created":
-			return fmt.Sprintf("Server %s wurde auf %s erstellt.", message.ServerName, message.NodeName)
-		case "server_deleted":
-			return fmt.Sprintf("Server %s wurde auf %s geloescht.", message.ServerName, message.NodeName)
-		case "worker_unhealthy":
-			return fmt.Sprintf("Worker %s ist seit mehr als einer Minute nicht mehr gruen.", message.NodeName)
-		case "server_down":
-			return fmt.Sprintf("Server %s auf %s ist seit mehr als einer Minute down.", message.ServerName, message.NodeName)
-		}
-	}
-	switch message.Kind {
-	case "server_created":
-		return fmt.Sprintf("Server %s was created on %s.", message.ServerName, message.NodeName)
-	case "server_deleted":
-		return fmt.Sprintf("Server %s was deleted on %s.", message.ServerName, message.NodeName)
-	case "worker_unhealthy":
-		return fmt.Sprintf("Worker %s has not been healthy for more than one minute.", message.NodeName)
-	case "server_down":
-		return fmt.Sprintf("Server %s on %s has been down for more than one minute.", message.ServerName, message.NodeName)
+	if text := i18n.NotificationEventText(locale, message.Kind, message.ServerName, message.NodeName, message.ActorName, message.Role); text != "" {
+		return text
 	}
 	return "Vestri notification"
 }
@@ -53,6 +33,18 @@ func notificationEventEnabled(events notificationEvents, kind string) bool {
 		return events.WorkerUnhealthy
 	case "server_down":
 		return events.ServerDown
+	case "worker_recovered":
+		return events.WorkerRecovered
+	case "server_recovered":
+		return events.ServerRecovered
+	case "server_invited":
+		return events.ServerInvited
+	case "server_access_granted":
+		return events.ServerAccessGranted
+	case "server_role_changed":
+		return events.ServerRoleChanged
+	case "server_access_removed":
+		return events.ServerAccessRemoved
 	}
 	return false
 }
@@ -80,7 +72,7 @@ func (s *Server) deliverNextNotification(ctx context.Context) (bool, error) {
 	var userID string
 	var emailPending, webhookPending bool
 	var attempts int
-	err = tx.QueryRow(ctx, `SELECT "id", "userId", "kind", "nodeId", "nodeName", "serverId", "serverName", "createdAt", "emailPending", "webhookPending", "attempts" FROM "Notification" WHERE ("emailPending" OR "webhookPending") AND NOT "deliveryFailed" AND "nextAttemptAt" <= NOW() ORDER BY "nextAttemptAt" LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&message.ID, &userID, &message.Kind, &message.NodeID, &message.NodeName, &message.ServerID, &message.ServerName, &message.CreatedAt, &emailPending, &webhookPending, &attempts)
+	err = tx.QueryRow(ctx, `SELECT "id", "userId", "kind", "nodeId", "nodeName", "serverId", "serverName", "actorName", "role", "createdAt", "emailPending", "webhookPending", "attempts" FROM "Notification" WHERE ("emailPending" OR "webhookPending") AND NOT "deliveryFailed" AND "nextAttemptAt" <= NOW() ORDER BY "nextAttemptAt", "id" LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&message.ID, &userID, &message.Kind, &message.NodeID, &message.NodeName, &message.ServerID, &message.ServerName, &message.ActorName, &message.Role, &message.CreatedAt, &emailPending, &webhookPending, &attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -107,7 +99,7 @@ func (s *Server) deliverNextNotification(ctx context.Context) (bool, error) {
 			emailPending = false
 		} else if s.Mailer != nil {
 			deliveryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			content := i18n.NotificationEmail(settings.Locale, message.Kind, message.ServerName, message.NodeName, message.CreatedAt.UTC().Format(time.RFC1123), s.notificationsActionURL(settings.Locale))
+			content := i18n.NotificationEmail(settings.Locale, message.Kind, message.ServerName, message.NodeName, message.CreatedAt.UTC().Format(time.RFC1123), s.notificationsActionURL(settings.Locale), message.ActorName, message.Role)
 			err := s.Mailer.Send(deliveryCtx, address, content.Subject, content.Text, content.HTML)
 			cancel()
 			if err == nil {

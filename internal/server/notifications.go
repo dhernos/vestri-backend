@@ -14,10 +14,16 @@ import (
 )
 
 type notificationEvents struct {
-	ServerCreated   bool `json:"server_created"`
-	ServerDeleted   bool `json:"server_deleted"`
-	WorkerUnhealthy bool `json:"worker_unhealthy"`
-	ServerDown      bool `json:"server_down"`
+	ServerCreated       bool `json:"server_created"`
+	ServerDeleted       bool `json:"server_deleted"`
+	WorkerUnhealthy     bool `json:"worker_unhealthy"`
+	ServerDown          bool `json:"server_down"`
+	WorkerRecovered     bool `json:"worker_recovered"`
+	ServerRecovered     bool `json:"server_recovered"`
+	ServerInvited       bool `json:"server_invited"`
+	ServerAccessGranted bool `json:"server_access_granted"`
+	ServerRoleChanged   bool `json:"server_role_changed"`
+	ServerAccessRemoved bool `json:"server_access_removed"`
 }
 
 type notificationSettings struct {
@@ -35,6 +41,8 @@ type notificationMessage struct {
 	NodeName       string     `json:"nodeName"`
 	ServerID       string     `json:"serverId"`
 	ServerName     string     `json:"serverName"`
+	ActorName      string     `json:"actorName"`
+	Role           string     `json:"role"`
 	CreatedAt      time.Time  `json:"createdAt"`
 	ReadAt         *time.Time `json:"readAt"`
 	DeliveryFailed bool       `json:"deliveryFailed"`
@@ -44,8 +52,16 @@ type notificationSettingsStore interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+func defaultNotificationEvents() notificationEvents {
+	return notificationEvents{
+		ServerCreated: true, ServerDeleted: true, WorkerUnhealthy: true, ServerDown: true,
+		WorkerRecovered: true, ServerRecovered: true, ServerInvited: true,
+		ServerAccessGranted: true, ServerRoleChanged: true, ServerAccessRemoved: true,
+	}
+}
+
 func (s *Server) notificationSettingsForUser(ctx context.Context, userID string, store notificationSettingsStore) (notificationSettings, error) {
-	settings := notificationSettings{Events: notificationEvents{true, true, true, true}, Locale: "en"}
+	settings := notificationSettings{Events: defaultNotificationEvents(), Locale: "en"}
 	err := store.QueryRow(ctx, `SELECT "events", "emailEnabled", "webhookEnabled", "webhookUrl", "locale" FROM "NotificationSettings" WHERE "userId"=$1`, userID).Scan(&settings.Events, &settings.EmailEnabled, &settings.WebhookEnabled, &settings.WebhookURL, &settings.Locale)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return settings, nil
@@ -72,7 +88,7 @@ func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, 200, settings)
 		return
 	}
-	var settings notificationSettings
+	settings := notificationSettings{Events: defaultNotificationEvents()}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&settings); err != nil {
@@ -138,7 +154,7 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	rows, err := s.Users.DB.Query(r.Context(), `SELECT "id", "kind", "nodeId", "nodeName", "serverId", "serverName", "createdAt", "readAt", "deliveryFailed" FROM "Notification" WHERE "userId"=$1 AND ("createdAt", "id") < ($2,$3) ORDER BY "createdAt" DESC, "id" DESC LIMIT 51`, sess.UserID, before, r.URL.Query().Get("beforeId"))
+	rows, err := s.Users.DB.Query(r.Context(), `SELECT "id", "kind", "nodeId", "nodeName", "serverId", "serverName", "actorName", "role", "createdAt", "readAt", "deliveryFailed" FROM "Notification" WHERE "userId"=$1 AND ("createdAt", "id") < ($2,$3) ORDER BY "createdAt" DESC, "id" DESC LIMIT 51`, sess.UserID, before, r.URL.Query().Get("beforeId"))
 	if err != nil {
 		writeError(w, 500, "Failed to load notifications")
 		return
@@ -147,7 +163,7 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 	messages := make([]notificationMessage, 0)
 	for rows.Next() {
 		var message notificationMessage
-		if err := rows.Scan(&message.ID, &message.Kind, &message.NodeID, &message.NodeName, &message.ServerID, &message.ServerName, &message.CreatedAt, &message.ReadAt, &message.DeliveryFailed); err != nil {
+		if err := rows.Scan(&message.ID, &message.Kind, &message.NodeID, &message.NodeName, &message.ServerID, &message.ServerName, &message.ActorName, &message.Role, &message.CreatedAt, &message.ReadAt, &message.DeliveryFailed); err != nil {
 			writeError(w, 500, "Failed to load notifications")
 			return
 		}
@@ -181,6 +197,21 @@ func (s *Server) handleUnreadNotifications(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, 200, map[string]int{"unread": unread})
+}
+
+func (s *Server) handleDeleteNotifications(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFromContext(r.Context())
+	if sess == nil {
+		writeError(w, 401, "Unauthorized")
+		return
+	}
+	id := chi.URLParam(r, "notificationId")
+	_, err := s.Users.DB.Exec(r.Context(), `DELETE FROM "Notification" WHERE "userId"=$1 AND ($2='' OR "id"=$2)`, sess.UserID, id)
+	if err != nil {
+		writeError(w, 500, "Failed to delete notifications")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleReadNotifications(w http.ResponseWriter, r *http.Request) {

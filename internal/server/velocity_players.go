@@ -182,6 +182,7 @@ func (s *Server) handleVelocityPlayers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Invalid player journal")
 		return
 	}
+	data.Attempts = boundedPlayerEventHistory(data.Attempts)
 	if r.Method == http.MethodPost {
 		updated, parseErr := time.Parse(time.RFC3339Nano, data.UpdatedAt)
 		if legacyEnabled && (absent || parseErr != nil || time.Since(updated) > 30*time.Second || data.PolicyHealthy == nil || !*data.PolicyHealthy) {

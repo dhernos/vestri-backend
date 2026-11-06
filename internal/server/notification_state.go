@@ -7,6 +7,20 @@ type notificationFailure struct {
 	Sent  bool
 }
 
+func advanceNotificationHealth(previous notificationFailure, unhealthy, healthy bool, now time.Time) (notificationFailure, bool, bool) {
+	if healthy {
+		return notificationFailure{}, false, previous.Sent
+	}
+	if !unhealthy {
+		if previous.Sent {
+			return previous, false, false
+		}
+		return notificationFailure{}, false, false
+	}
+	next, emit := advanceNotificationFailure(previous, true, now)
+	return next, emit, false
+}
+
 func advanceNotificationFailure(previous notificationFailure, unhealthy bool, now time.Time) (notificationFailure, bool) {
 	if !unhealthy {
 		return notificationFailure{}, false

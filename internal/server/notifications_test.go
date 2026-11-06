@@ -14,7 +14,7 @@ import (
 
 func TestNotificationHandlersRequireSession(t *testing.T) {
 	api := &Server{}
-	for _, handler := range []http.HandlerFunc{api.handleListNotifications, api.handleUnreadNotifications, api.handleReadNotifications, api.handleNotificationSettings} {
+	for _, handler := range []http.HandlerFunc{api.handleListNotifications, api.handleUnreadNotifications, api.handleReadNotifications, api.handleDeleteNotifications, api.handleNotificationSettings} {
 		response := httptest.NewRecorder()
 		handler(response, httptest.NewRequest(http.MethodGet, "/", nil))
 		if response.Code != http.StatusUnauthorized {
@@ -42,6 +42,22 @@ func TestNotificationSettingsRejectInvalidPayloads(t *testing.T) {
 				t.Fatalf("got %d, want 400: %s", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestNotificationPreferencesLegacyAndReleaseKinds(t *testing.T) {
+	events := defaultNotificationEvents()
+	if err := json.Unmarshal([]byte(`{"server_down":false,"server_role_changed":false}`), &events); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"server_created", "server_deleted", "worker_unhealthy", "server_down", "worker_recovered", "server_recovered", "server_invited", "server_access_granted", "server_role_changed", "server_access_removed"} {
+		want := kind != "server_down" && kind != "server_role_changed"
+		if notificationEventEnabled(events, kind) != want {
+			t.Fatalf("wrong legacy/default preference for %s", kind)
+		}
+	}
+	if notificationEventEnabled(events, "unknown") {
+		t.Fatal("unknown event must not be delivered")
 	}
 }
 

@@ -35,6 +35,8 @@ var endpointAccess = []AccessRule{
 
 	{Method: http.MethodGet, Path: "/api/auth/me", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/notifications", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodDelete, Path: "/api/notifications", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodDelete, Path: "/api/notifications/{notificationId}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/notifications/unread", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/notifications/settings", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/notifications/settings", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
@@ -144,6 +146,7 @@ var endpointAccess = []AccessRule{
 	{Method: http.MethodDelete, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/invites/{inviteId}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/guests", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodDelete, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/guests/{guestUserId}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPatch, Path: "/api/nodes/{nodeRef}/servers/{serverRef}/guests/{guestUserId}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/worker/*", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/worker/*", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 }
