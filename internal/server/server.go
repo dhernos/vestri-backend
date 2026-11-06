@@ -14,6 +14,8 @@ import (
 	"yourapp/internal/email"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 type Server struct {
