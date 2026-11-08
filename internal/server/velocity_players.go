@@ -11,14 +11,37 @@ import (
 )
 
 type velocityPlayerPolicy struct {
-	WhitelistEnabled bool                      `json:"whitelistEnabled"`
-	Whitelist        []minecraftWhitelistEntry `json:"whitelist"`
-	Bans             []minecraftWhitelistEntry `json:"bans"`
-	IPBans           []string                  `json:"ipBans"`
+	WhitelistEnabled        bool                      `json:"whitelistEnabled"`
+	Whitelist               []minecraftWhitelistEntry `json:"whitelist"`
+	Bans                    []minecraftWhitelistEntry `json:"bans"`
+	IPBans                  []string                  `json:"ipBans"`
+	CountryWhitelistEnabled bool                      `json:"countryWhitelistEnabled"`
+	CountryWhitelist        []string                  `json:"countryWhitelist"`
+	CountryBans             []string                  `json:"countryBans"`
 }
 
+var velocityCountryCodes = func() map[string]struct{} {
+	codes := strings.Fields(`AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ
+BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ
+CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ
+DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR
+GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY
+HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP
+KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY
+MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ
+NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY
+QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ
+TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ
+VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW`)
+	set := make(map[string]struct{}, len(codes))
+	for _, code := range codes {
+		set[code] = struct{}{}
+	}
+	return set
+}()
+
 func emptyVelocityPlayerPolicy() velocityPlayerPolicy {
-	return velocityPlayerPolicy{Whitelist: []minecraftWhitelistEntry{}, Bans: []minecraftWhitelistEntry{}, IPBans: []string{}}
+	return velocityPlayerPolicy{Whitelist: []minecraftWhitelistEntry{}, Bans: []minecraftWhitelistEntry{}, IPBans: []string{}, CountryWhitelist: []string{}, CountryBans: []string{}}
 }
 
 func parseVelocityPlayerPolicy(content string) (velocityPlayerPolicy, error) {
@@ -30,6 +53,11 @@ func parseVelocityPlayerPolicy(content string) (velocityPlayerPolicy, error) {
 	for _, key := range []string{"whitelistEnabled", "whitelist", "bans", "ipBans"} {
 		if value, found := fields[key]; !found || strings.TrimSpace(string(value)) == "null" {
 			return policy, fmt.Errorf("Missing player policy field: %s", key)
+		}
+	}
+	for _, key := range []string{"countryWhitelistEnabled", "countryWhitelist", "countryBans"} {
+		if value, found := fields[key]; found && strings.TrimSpace(string(value)) == "null" {
+			return policy, fmt.Errorf("Invalid player policy field: %s", key)
 		}
 	}
 	if len(content) > 4<<20 || json.Unmarshal([]byte(content), &policy) != nil || strings.TrimSpace(content) == "null" || policy.Whitelist == nil || policy.Bans == nil || policy.IPBans == nil {
@@ -48,7 +76,46 @@ func parseVelocityPlayerPolicy(content string) (velocityPlayerPolicy, error) {
 			return policy, fmt.Errorf("Invalid IP ban in proxy policy")
 		}
 	}
+	for _, countries := range [][]string{policy.CountryWhitelist, policy.CountryBans} {
+		for _, country := range countries {
+			if _, valid := velocityCountryCodes[country]; !valid {
+				return policy, fmt.Errorf("Invalid country in proxy policy")
+			}
+		}
+	}
 	return policy, nil
+}
+
+func updateVelocityCountryPolicy(policy *velocityPlayerPolicy, action, country string, enabled bool) error {
+	switch action {
+	case "country-whitelist-enable":
+		policy.CountryWhitelistEnabled = enabled
+		return nil
+	case "country-whitelist-add", "country-whitelist-remove", "country-ban", "country-unban":
+		country = strings.ToUpper(strings.TrimSpace(country))
+		if _, valid := velocityCountryCodes[country]; !valid {
+			return fmt.Errorf("Invalid country code")
+		}
+		countries := &policy.CountryBans
+		if strings.HasPrefix(action, "country-whitelist-") {
+			countries = &policy.CountryWhitelist
+		}
+		updated := make([]string, 0, len(*countries)+1)
+		seen := make(map[string]struct{}, len(*countries)+1)
+		for _, existing := range *countries {
+			if _, duplicate := seen[existing]; existing != country && !duplicate {
+				updated = append(updated, existing)
+				seen[existing] = struct{}{}
+			}
+		}
+		if action == "country-whitelist-add" || action == "country-ban" {
+			updated = append(updated, country)
+		}
+		*countries = updated
+		return nil
+	default:
+		return fmt.Errorf("Invalid country management action")
+	}
 }
 
 func updateVelocityPlayerPolicy(policy *velocityPlayerPolicy, action string, entry minecraftWhitelistEntry, ip string, enabled bool) error {
@@ -176,11 +243,13 @@ func (s *Server) handleVelocityPlayers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var data struct {
-		UpdatedAt     string            `json:"updatedAt"`
-		PolicyHealthy *bool             `json:"policyHealthy"`
-		PolicyError   string            `json:"policyError"`
-		Players       []json.RawMessage `json:"players"`
-		Attempts      []json.RawMessage `json:"attempts"`
+		UpdatedAt              string            `json:"updatedAt"`
+		PolicyHealthy          *bool             `json:"policyHealthy"`
+		PolicyError            string            `json:"policyError"`
+		CountryPolicySupported bool              `json:"countryPolicySupported"`
+		CountryLookupAvailable bool              `json:"countryLookupAvailable"`
+		Players                []json.RawMessage `json:"players"`
+		Attempts               []json.RawMessage `json:"attempts"`
 	}
 	data.Players, data.Attempts = []json.RawMessage{}, []json.RawMessage{}
 	if !absent && json.Unmarshal([]byte(journal), &data) != nil {
@@ -199,6 +268,7 @@ func (s *Server) handleVelocityPlayers(w http.ResponseWriter, r *http.Request) {
 			Username string `json:"username"`
 			UUID     string `json:"uuid"`
 			IP       string `json:"ip"`
+			Country  string `json:"country"`
 			Enabled  bool   `json:"enabled"`
 		}
 		if decodeJSON(r, &request) != nil {
@@ -224,7 +294,16 @@ func (s *Server) handleVelocityPlayers(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if err := updateVelocityPlayerPolicy(&policy, request.Action, entry, strings.TrimSpace(request.IP), request.Enabled); err != nil {
+		if strings.HasPrefix(request.Action, "country-") {
+			if !data.CountryPolicySupported {
+				writeError(w, http.StatusConflict, "Restart the proxy with the updated Vestri plugin before managing country restrictions")
+				return
+			}
+			err = updateVelocityCountryPolicy(&policy, request.Action, request.Country, request.Enabled)
+		} else {
+			err = updateVelocityPlayerPolicy(&policy, request.Action, entry, strings.TrimSpace(request.IP), request.Enabled)
+		}
+		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -250,6 +329,7 @@ func (s *Server) handleVelocityPlayers(w http.ResponseWriter, r *http.Request) {
 		"policy": policy, "players": data.Players, "attempts": data.Attempts,
 		"updatedAt": data.UpdatedAt, "available": !absent,
 		"policyHealthy": data.PolicyHealthy, "policyError": data.PolicyError,
+		"countryPolicySupported": data.CountryPolicySupported, "countryLookupAvailable": data.CountryLookupAvailable,
 		"legacyMigration": legacyEnabled,
 		"entries":         policy.Whitelist, "mainServerName": proxy.Name,
 	})

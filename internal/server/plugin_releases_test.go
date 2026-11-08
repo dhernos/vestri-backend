@@ -53,6 +53,53 @@ func TestPinnedHangarPluginRelease(t *testing.T) {
 	}
 }
 
+func TestPinnedModrinthPluginRelease(t *testing.T) {
+	original := pluginHTTPClient
+	t.Cleanup(func() { pluginHTTPClient = original })
+	link := "https://cdn.modrinth.com/data/projectID/versions/versionID/plugin-1.2.jar"
+	source, err := parsePluginSource(link)
+	if err != nil || source.Provider != "modrinth" || source.Project != "projectID" || source.Version != "versionID" {
+		t.Fatalf("source=%+v error=%v", source, err)
+	}
+	trackedSource, err := parsePluginSource(link + "?mr_download_reason=standalone")
+	if err != nil || trackedSource != source {
+		t.Fatalf("tracking parameter changed source: %+v error=%v", trackedSource, err)
+	}
+	for _, scenario := range []struct {
+		name, project, version, download, checksum, loader string
+		wantError                                          bool
+	}{
+		{"verified", "projectID", "versionID", link, "verified-hash", "paper", false},
+		{"wrong project", "other", "versionID", link, "verified-hash", "paper", true},
+		{"wrong version", "projectID", "other", link, "verified-hash", "paper", true},
+		{"wrong file", "projectID", "versionID", link + ".other", "verified-hash", "paper", true},
+		{"missing checksum", "projectID", "versionID", link, "", "paper", true},
+		{"mod only", "projectID", "versionID", link, "verified-hash", "fabric", true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			pluginHTTPClient = &http.Client{Transport: pluginRoundTripper(func(req *http.Request) (*http.Response, error) {
+				if req.URL.String() != "https://api.modrinth.com/v2/version/versionID" {
+					t.Fatalf("unexpected metadata URL: %s", req.URL)
+				}
+				body, _ := json.Marshal(map[string]interface{}{"id": scenario.version, "project_id": scenario.project, "loaders": []string{scenario.loader}, "files": []interface{}{map[string]interface{}{"filename": "plugin-1.2.jar", "url": scenario.download, "hashes": map[string]string{"sha512": scenario.checksum}}}})
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+			})}
+			release, refs, err := latestPluginRelease(context.Background(), source, []pluginCompatibilityTarget{{ServerRef: "paper", Platform: "PAPER"}, {ServerRef: "proxy", Platform: "VELOCITY"}})
+			if (err != nil) != scenario.wantError {
+				t.Fatalf("release=%+v refs=%v error=%v", release, refs, err)
+			}
+			if !scenario.wantError && (release.URL != link || release.SHA512 != scenario.checksum || !reflect.DeepEqual(refs, []string{"paper"})) {
+				t.Fatalf("unexpected release=%+v refs=%v", release, refs)
+			}
+		})
+	}
+	for _, invalid := range []string{link + "?download=1", link + "#fragment", "https://cdn.modrinth.com:8443/data/projectID/versions/versionID/plugin.jar", "https://cdn.modrinth.com/data/projectID/versions/versionID/plugin.zip", "https://cdn.modrinth.com/data/projectID/versions/versionID/../plugin.jar"} {
+		if _, err := parsePluginSource(invalid); err == nil {
+			t.Errorf("accepted invalid link %s", invalid)
+		}
+	}
+}
+
 func TestLatestPaperPluginRelease(t *testing.T) {
 	original := pluginHTTPClient
 	t.Cleanup(func() { pluginHTTPClient = original })

@@ -86,6 +86,12 @@ func parsePluginSource(raw string) (pluginSource, error) {
 		if len(parts) >= 2 && parts[0] == "plugin" && validPart(parts[1]) {
 			return pluginSource{Provider: "modrinth", Project: parts[1]}, nil
 		}
+	case "cdn.modrinth.com":
+		query, queryErr := url.ParseQuery(parsed.RawQuery)
+		if queryErr == nil && (len(query) == 0 || len(query) == 1 && query.Has("mr_download_reason")) && parsed.Fragment == "" && len(parts) == 5 && parts[0] == "data" && parts[2] == "versions" && validPart(parts[1]) && validPart(parts[3]) && validArtifactPart(parts[4]) && strings.HasSuffix(strings.ToLower(parts[4]), ".jar") {
+			parsed.RawQuery = ""
+			return pluginSource{Provider: "modrinth", Project: parts[1], Version: parts[3], DownloadURL: parsed.String()}, nil
+		}
 	case "hangar.papermc.io":
 		if len(parts) >= 2 && validPart(parts[0]) && validPart(parts[1]) {
 			return pluginSource{Provider: "hangar", Project: parts[0] + "/" + parts[1]}, nil
@@ -111,7 +117,7 @@ func parsePluginSource(raw string) (pluginSource, error) {
 			DownloadURL: parsed.String(),
 		}, nil
 	}
-	return pluginSource{}, fmt.Errorf("use a Modrinth /plugin/project, Hangar /author/project, or Hangar CDN JAR link")
+	return pluginSource{}, fmt.Errorf("use a Modrinth /plugin/project, Hangar /author/project, or Modrinth/Hangar CDN JAR link")
 }
 
 func trustedPluginDownloadURL(target *url.URL) bool {
@@ -152,7 +158,43 @@ func latestPluginRelease(ctx context.Context, source pluginSource, targets []plu
 	if len(targets) == 0 {
 		return release, nil, fmt.Errorf("no versioned plugin targets are available")
 	}
-	if source.Version != "" {
+	if source.Version != "" && source.Provider == "modrinth" {
+		var version struct {
+			ID        string   `json:"id"`
+			ProjectID string   `json:"project_id"`
+			Loaders   []string `json:"loaders"`
+			Files     []struct {
+				Filename string `json:"filename"`
+				URL      string `json:"url"`
+				Hashes   struct {
+					SHA512 string `json:"sha512"`
+				} `json:"hashes"`
+			} `json:"files"`
+		}
+		if err := pluginAPIJSON(ctx, "https://api.modrinth.com/v2/version/"+url.PathEscape(source.Version), &version); err != nil {
+			return release, nil, err
+		}
+		if version.ID != source.Version || version.ProjectID != source.Project {
+			return release, nil, fmt.Errorf("Modrinth version does not match the supplied project and version")
+		}
+		for _, file := range version.Files {
+			if file.URL == source.DownloadURL {
+				release = pluginRelease{Version: version.ID, Filename: file.Filename, URL: file.URL, SHA512: file.Hashes.SHA512}
+				break
+			}
+		}
+		if release.Version == "" {
+			return release, nil, fmt.Errorf("Modrinth version does not match the supplied download link")
+		}
+		for _, target := range targets {
+			if containsPluginValue(version.Loaders, strings.ToLower(target.Platform)) {
+				compatibleRefs = append(compatibleRefs, target.ServerRef)
+			}
+		}
+		if len(compatibleRefs) == 0 {
+			return pluginRelease{}, nil, fmt.Errorf("no configured server supports the pinned Modrinth plugin platform")
+		}
+	} else if source.Version != "" {
 		if source.Provider != "hangar" || source.Platform == "" || source.DownloadURL == "" {
 			return release, nil, fmt.Errorf("invalid pinned Hangar plugin source")
 		}
