@@ -28,10 +28,10 @@ Example template spec (use existing base/proxy resource IDs):
     "joinTimeout": "20s",
     "readyServers": 1,
     "lifecycle": {
-      "ready": {"trigger": "serverLoad"},
+      "ready": { "trigger": "serverLoad" },
       "onAllJoined": [
-        {"command": "team add {team}", "forEach": "team"},
-        {"command": "team join {team} {player}", "forEach": "player"}
+        { "command": "team add {team}", "forEach": "team" },
+        { "command": "team join {team} {player}", "forEach": "player" }
       ],
       "end": {
         "logPattern": "^MATCH_END$",
