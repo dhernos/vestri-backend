@@ -17,15 +17,17 @@ import (
 )
 
 type minecraftResourceSpec struct {
-	Software         string   `json:"software,omitempty"`
-	Version          string   `json:"version,omitempty"`
-	Jar              string   `json:"jar,omitempty"`
-	MandatoryPlugins []string `json:"mandatoryPlugins,omitempty"`
-	BaseID           string   `json:"baseId,omitempty"`
-	WorldID          string   `json:"worldId,omitempty"`
-	PluginIDs        []string `json:"pluginIds,omitempty"`
-	ParentID         string   `json:"parentId,omitempty"`
-	MaxInstances     int      `json:"maxInstances,omitempty"`
+	Software         string                 `json:"software,omitempty"`
+	Version          string                 `json:"version,omitempty"`
+	Jar              string                 `json:"jar,omitempty"`
+	MandatoryPlugins []string               `json:"mandatoryPlugins,omitempty"`
+	BaseID           string                 `json:"baseId,omitempty"`
+	WorldID          string                 `json:"worldId,omitempty"`
+	PluginIDs        []string               `json:"pluginIds,omitempty"`
+	ParentID         string                 `json:"parentId,omitempty"`
+	MaxInstances     int                    `json:"maxInstances,omitempty"`
+	Mode             string                 `json:"mode,omitempty"`
+	Minigame         *minecraftMinigameSpec `json:"minigame,omitempty"`
 }
 
 type minecraftResourceFilesScopeKey struct{}
@@ -342,6 +344,10 @@ func (s *Server) handleCreateMinecraftResource(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusBadRequest, "maxInstances must be between 1 and 100")
 			return
 		}
+		if err = validateMinecraftMinigame(&spec); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if spec.ParentID == "" {
 			writeError(w, http.StatusBadRequest, "Select the Velocity proxy for dynamic game instances")
 			return
@@ -440,7 +446,64 @@ func (s *Server) handleCreateMinecraftResource(w http.ResponseWriter, r *http.Re
 		return
 	}
 	complete = true
+	if err = s.syncMinecraftResourceProxy(r.Context(), worker, &resource); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{"error": "Resource created, but proxy synchronization failed; retry proxy sync, not creation", "resource": resource, "committed": true})
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"resource": resource})
+}
+
+func (s *Server) syncMinecraftResourceProxy(ctx context.Context, worker pluginWorker, resource *auth.MinecraftResource) error {
+	if resource.Kind != "templates" {
+		return nil
+	}
+	var spec minecraftResourceSpec
+	if err := json.Unmarshal(resource.Spec, &spec); err != nil {
+		return fmt.Errorf("invalid template metadata")
+	}
+	if spec.ParentID == "" {
+		return nil
+	}
+	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	parent, err := s.Users.FindGameServerByRefForNode(syncCtx, resource.NodeID, spec.ParentID)
+	if err != nil {
+		return err
+	}
+	if parent == nil || !isVelocityServer(parent) {
+		return fmt.Errorf("template proxy is unavailable")
+	}
+	return s.syncMinecraftProxy(syncCtx, worker, resource.NodeID, parent, "")
+}
+
+func (s *Server) handleSyncMinecraftProxy(w http.ResponseWriter, r *http.Request) {
+	_, node, ok := s.loadMinecraftAdmin(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	unlock, err := s.lockNodePlugins(ctx, node.ID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	defer unlock()
+	parent, err := s.Users.FindGameServerByRefForNode(ctx, node.ID, chi.URLParam(r, "proxyRef"))
+	if err != nil || parent == nil || !isVelocityServer(parent) {
+		writeError(w, http.StatusNotFound, "Velocity proxy not found on this node")
+		return
+	}
+	baseURL, apiKey, err := s.workerTargetFromNode(node)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Invalid worker configuration")
+		return
+	}
+	if err = s.syncMinecraftProxy(ctx, pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, node.ID, parent, ""); err != nil {
+		writeError(w, http.StatusBadGateway, "Proxy synchronization failed; retry after restoring proxy/worker availability")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleDeleteMinecraftResource(w http.ResponseWriter, r *http.Request) {
@@ -482,6 +545,10 @@ func (s *Server) handleDeleteMinecraftResource(w http.ResponseWriter, r *http.Re
 	}
 	if err = s.Users.DeleteMinecraftResource(r.Context(), node.ID, id); err != nil {
 		writeError(w, http.StatusConflict, "Resource is still in use")
+		return
+	}
+	if err = s.syncMinecraftResourceProxy(r.Context(), pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, resource); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{"error": "Resource deleted, but proxy synchronization failed; retry proxy sync, not deletion", "resourceId": id, "committed": true})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

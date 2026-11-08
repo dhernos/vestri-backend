@@ -4,6 +4,158 @@ Backend documentation lives in the main repository:
 
 - https://github.com/dhernos/vestri
 
+## Minecraft Minigame Templates
+
+Minecraft template `spec` accepts optional `mode` (`""`, `"player"`, or
+`"minigames"`) and optional `minigame`. Existing ordinary templates without
+either field remain compatible. `minigame` is required only for `minigames`
+mode and rejected in other modes. Creation and spawn both validate the spec,
+including saved metadata on request-ID retries. No database migration is needed.
+
+Example template spec (use existing base/proxy resource IDs):
+
+```json
+{
+  "baseId": "<base UUID>",
+  "parentId": "<Velocity server ID>",
+  "maxInstances": 3,
+  "mode": "minigames",
+  "minigame": {
+    "teams": ["red", "blue"],
+    "teamSize": 2,
+    "minPlayers": 2,
+    "maxPlayers": 4,
+    "joinTimeout": "20s",
+    "readyServers": 1,
+    "lifecycle": {
+      "ready": {"trigger": "serverLoad"},
+      "onAllJoined": [
+        {"command": "team add {team}", "forEach": "team"},
+        {"command": "team join {team} {player}", "forEach": "player"}
+      ],
+      "end": {
+        "logPattern": "^MATCH_END$",
+        "whenEmpty": true,
+        "emptyGrace": "10s",
+        "returnPlayersTo": "lobby",
+        "deleteServer": true
+      }
+    }
+  }
+}
+```
+
+- `teams`: 1-100 unique, case-sensitive identifiers matching
+  `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. `returnPlayersTo` uses the same identifier
+  rule. The backend does not check Minecraft team or fallback-server existence.
+- `teamSize`, `minPlayers`, and `maxPlayers`: integers 1-100, with
+  `minPlayers <= maxPlayers <= len(teams) * teamSize`.
+- `readyServers`: integer 0 through template `maxInstances` (itself 1-100);
+  omitted means 0. `joinTimeout` defaults to `20s`; `emptyGrace` defaults to
+  `10s`. Both use Go duration strings and must be between `1s` and `10m`
+  inclusive, with whole-millisecond precision. Validated values normalize to
+  canonical Go duration strings (`20s`, `1m20s`, `1.5s`, `1.001s`), compatible
+  with the Java parser for concatenated ms/s/m/h components; sub-millisecond precision is rejected rather
+  than rounded. `returnPlayersTo` defaults to `lobby`.
+- `ready.trigger`: required, `serverLoad` or `explicit`. `onAllJoined` is
+  an array of at most 100 commands (omitted/null becomes `[]`). Each command is
+  1-1024 bytes, nonblank, without a leading slash (including after whitespace)
+  or control characters/newlines. `forEach` is empty/omitted, `team`, or `player`.
+  Only `{team}`, `{player}`, `{uuid}`, and `{matchId}` placeholders are accepted;
+  unmatched braces are rejected. `{team}` requires team or player repetition;
+  `{player}` and `{uuid}` require player repetition; `{matchId}` works anywhere.
+- `end.logPattern` is optional, at most 512 bytes, and has no CR/LF. It must
+  compile with Go's regexp engine; named groups, lookarounds/backreferences,
+  ungreedy flags, POSIX classes, octal escapes without leading zero, and
+  divergent Unicode/escape forms are rejected for practical Java compatibility.
+  This is not a complete Java regex verifier or a Java execution-time bound;
+  avoid pathological nested repetition and test patterns in the plugin runtime.
+- `end.whenEmpty` is boolean (omitted means false); `end.deleteServer` must
+  explicitly be `true`. The backend validates and transports lifecycle rules;
+  executing commands, readiness, transfers, end detection, and deletion remains
+  the plugin's responsibility.
+
+Before instance startup, the backend writes
+`<instance root>/data/plugins/VestriConsoleBridge/minigame.json` containing
+`{slug, token, controlUrl, spec, spawnRequestId?}`. Optional `spawnRequestId` is
+the validated raw caller request UUID, preserved exactly for private correlation.
+`token` is a fresh cryptographically random
+64-character lowercase hex credential per instance, replacing any copied config.
+`controlUrl` is exactly `http://<velocityBackendHostForSlug(parent.Slug)>:25580`.
+The proxy bridge must listen on that port on the shared Velocity Docker network.
+Saved-request retries preserve the saved token, spec, and existing correlation;
+if `spawnRequestId` is absent, they backfill it from the caller UUID without
+rotating the token. Missing/corrupt/wrong-proxy files fail closed; restore the saved file or
+delete and respawn the instance. Ordinary spawns/retries remove stale copied
+`minigame.json` and do not receive minigame credentials.
+All fresh spawns also remove copied `minigame-execution.json` from the same
+directory before any fresh token is written. Retries never remove that durable
+execution fence from an existing instance.
+Fresh minigame spawns always replace copied `server.properties` player limits
+with `max-players=spec.minigame.maxPlayers`. Ordinary player limits are unchanged;
+saved-request retries do not rewrite server properties.
+
+Proxy synchronization writes top-level `minigames` alongside `servers` in
+`vestri-dynamic-servers.json`. `minigames` maps the exact template **name** to
+the flattened minigame spec plus `maxInstances`, includes templates with no
+instances, and only includes minigame templates for that parent proxy. Server
+entries remain keyed by slug with existing `name`, `host`, `port`; minigame
+instances additionally include `serverId` and `id` (both the database server ID),
+`requestId`, `template` (exact template name), `spec`, and `token` read from their instance
+file. `requestId` is the exact persisted `auth.MinecraftInstance.RequestID`,
+currently the lowercase SHA-256 hex digest of `key.ID + ":" + request UUID`.
+It is not the server slug, server ID, or raw caller request UUID and remains
+unchanged. When present in the instance config, `spawnRequestId` is also included
+in the private minigame server entry so the proxy can correlate its local caller
+UUID before the spawn response arrives. Legacy configs omit this field until
+backfilled by a saved-request retry. Neither tokens nor `spawnRequestId` are
+added to public spawn responses. Excluded/deleting instances are omitted.
+The top-level `maxInstances` value within each minigame entry remains the template
+cap, and `readyServers` remains the desired ready-pool count within that cap.
+Each private `servers[slug].spec` has the same flattened shape as
+`minigames[templateName]`: inline minigame fields plus `maxInstances`, with no
+extra `minigame` wrapper, hash, or version. Its minigame fields come from the saved
+spawn-time instance `config.Spec`; only `maxInstances` uses the current template
+cap. The top-level template entry continues to contain the current template spec.
+The proxy can persist `target.spec` in its per-instance ledger and compare raw
+specs to drain mismatched ready instances, while active instances retain their
+original lifecycle. Ordinary server entries omit `spec`. This is a transport
+contract only; the backend does not perform draining or change plugin behavior.
+
+Template creation synchronizes the parent proxy after database persistence,
+before returning success, so ready-pool discovery includes brand-new templates
+before any spawn. Template deletion synchronizes after database deletion to remove
+discovery entries. Both syncs have a separate 30-second timeout and continue if
+the original request is canceled. A sync failure returns HTTP 502 with
+`committed: true` and the created `resource` or deleted `resourceId`: the database
+change is already committed. Created files are retained, with no destructive
+rollback. Fix proxy/worker availability and manually retry with session-authenticated
+`POST /api/nodes/{nodeRef}/minecraft/proxies/{proxyRef}/sync` (node owner/admin;
+proxy ID or slug). This regenerates the manifest and reloads the proxy, returning
+HTTP 204 on success; it does not spawn instances or change API keys.
+Do not repeat creation or deletion. Until sync succeeds, discovery may
+be stale. There is no automatic retry queue.
+
+The plugin's existing `vestri-dynamic-config.json` **`templates` map from names
+to template-scoped API keys remains manual user configuration**. Automatic
+manifest generation does not mint API keys or modify that config. Configure the
+matching exact template names and keys on the proxy, including capitalization
+and spaces: a manifest key and server `template` of `Team Game` must map to the
+config key `Team Game`, not `team game` or a slug. Deploy a compatible plugin
+before using minigame mode; this backend change alone does not add plugin runtime
+behavior. Credentials appear only in worker-side instance/proxy files, not
+template metadata or instance API responses; authorized file administrators can
+still read them. Protect worker access and do not publish these files.
+
+Focused regressions: `go test ./internal/server -run TestMinecraftMinigame -count=1`.
+They cover validation/defaults, worker provisioning/retry/cleanup/failures,
+exact request-ID and name transport, duration normalization, parent-scoped
+manifests, the protected manual sync route, and token-free public instance responses.
+Set `VESTRI_VELOCITY_TEST_DATABASE_URL` to a disposable PostgreSQL URL to also run
+the isolated-schema discovery regression: brand-new templates with zero instances,
+deleted template removal, cancellation-independent post-commit sync, and retained
+resources/retry after a proxy reload failure.
+
 ## Notifications
 
 Migrations `000009_notifications`, `000010_notification_inbox_always`, and

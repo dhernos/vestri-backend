@@ -176,6 +176,10 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusConflict, "Template metadata is invalid")
 		return
 	}
+	if err = validateMinecraftMinigame(&spec); err != nil {
+		writeError(w, http.StatusConflict, "Template minigame metadata is invalid: "+err.Error())
+		return
+	}
 	requestHash := sha256.Sum256([]byte(keyID + ":" + request.RequestID))
 	requestID := hex.EncodeToString(requestHash[:])
 	instances, err := s.Users.ListMinecraftInstances(ctx, node.ID)
@@ -201,6 +205,18 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 				return
 			}
 			metadata := parseGameServerMetadata(server.Metadata)
+			var retryParent *auth.GameServer
+			if spec.Mode == "minigames" {
+				retryParent, err = s.Users.FindGameServerByRefForNode(ctx, node.ID, metadata.ParentServerID)
+				if err != nil || retryParent == nil || !isVelocityServer(retryParent) {
+					writeError(w, http.StatusConflict, "The instance requires an existing Velocity proxy")
+					return
+				}
+			}
+			if err = provisionMinecraftMinigame(ctx, pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, server, retryParent, &spec, true, request.RequestID); err != nil {
+				writeError(w, http.StatusBadGateway, "Failed to prepare instance minigame configuration")
+				return
+			}
 			if err = s.ensureVestriPlugin(ctx, baseURL, apiKey, node.ID, server.RootPath, metadata.SoftwareVersion, resolvedGameServerKind(server, metadata)); err != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"message": "Failed to install Vestri plugin; retry the same requestId", "serverId": server.ID})
 				return
@@ -279,13 +295,17 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Failed to copy server template")
 		return
 	}
+	if err = provisionMinecraftMinigame(ctx, worker, &auth.GameServer{Slug: slug, RootPath: slug}, parent, &spec, false, request.RequestID); err != nil {
+		writeError(w, http.StatusBadGateway, "Failed to prepare instance minigame configuration")
+		return
+	}
 	propertiesPath := path.Join(slug, "data/server.properties")
 	properties, _, err := s.workerReadFileOptional(ctx, baseURL, apiKey, propertiesPath)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to read server properties")
 		return
 	}
-	properties = minecraftInstanceProperties(properties, spec.WorldID == "")
+	properties = minecraftMinigameInstanceProperties(minecraftInstanceProperties(properties, spec.WorldID == ""), &spec)
 	if spec.WorldID == "" {
 		for _, world := range []string{"world", "world_nether", "world_the_end"} {
 			if err = s.workerDeletePath(ctx, baseURL, apiKey, path.Join(slug, "data", world), true); err != nil {
@@ -405,24 +425,11 @@ func (s *Server) syncMinecraftProxy(ctx context.Context, worker pluginWorker, no
 	if err != nil {
 		return err
 	}
-	dynamic := map[string]bool{}
-	for _, instance := range instances {
-		if instance.ServerID != excludeID {
-			dynamic[instance.ServerID] = true
-		}
+	resources, err := s.Users.ListMinecraftResources(ctx, nodeID)
+	if err != nil {
+		return err
 	}
-	targets := map[string]interface{}{}
-	for _, server := range servers {
-		if !dynamic[server.ID] {
-			continue
-		}
-		metadata := parseGameServerMetadata(server.Metadata)
-		if metadata.ParentServerID != parent.ID {
-			continue
-		}
-		targets[server.Slug] = map[string]interface{}{"name": minecraftInstanceProxyName(&server), "host": metadata.ConnectHost, "port": metadata.ConnectPort}
-	}
-	manifest, err := json.Marshal(map[string]interface{}{"servers": targets})
+	manifest, err := buildMinecraftProxyManifest(ctx, worker, parent, resources, instances, servers, excludeID)
 	if err != nil {
 		return err
 	}
@@ -657,6 +664,7 @@ func (s *Server) registerMinecraftRoutes(r chi.Router) {
 		routes.Use(s.requireRoles([]string{RoleUser, RoleAdmin, RoleEditor}))
 		root := "/api/nodes/{nodeRef}/minecraft"
 		routes.Get(root, s.handleMinecraftLibrary)
+		routes.Post(root+"/proxies/{proxyRef}/sync", s.handleSyncMinecraftProxy)
 		routes.Post(root+"/resources", s.handleCreateMinecraftResource)
 		routes.Post(root+"/resources/{resourceId}/shared-plugins", s.handleImportMinecraftSharedPlugins)
 		routes.Delete(root+"/resources/{resourceId}", s.handleDeleteMinecraftResource)
