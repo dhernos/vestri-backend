@@ -371,7 +371,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadGateway, "Failed to configure Velocity forwarding")
 		return
 	}
-	metadata := gameServerStoredMetadata{TemplateName: template.Name, Game: "minecraft", SoftwareVersion: spec.Software, GameVersion: spec.Version, Kind: gameServerKindVelocityBackend, ParentServerID: parent.ID, VelocityNetwork: network, VelocityServerName: instanceName, ConnectHost: velocityBackendHostForSlug(slug), ConnectPort: defaultMinecraftPort, ConfigFiles: vanilla.ConfigFiles}
+	metadata := gameServerStoredMetadata{TemplateName: template.Name, Game: "minecraft", SoftwareVersion: spec.Software, GameVersion: spec.Version, Kind: gameServerKindVelocityBackend, MinecraftMode: spec.Mode, ParentServerID: parent.ID, VelocityNetwork: network, VelocityServerName: instanceName, ConnectHost: velocityBackendHostForSlug(slug), ConnectPort: defaultMinecraftPort, ConfigFiles: vanilla.ConfigFiles}
 	metadataRaw, _ := json.Marshal(metadata)
 	created, err = s.Users.CreateMinecraftGameInstance(ctx, auth.CreateGameServerParams{NodeID: node.ID, Slug: slug, Name: instanceName, TemplateID: vanillaTemplateID, StackName: slug, RootPath: slug, ComposePath: path.Join(slug, "docker-compose.yml"), Metadata: metadataRaw, CreatedByUserID: userID}, auth.MinecraftInstance{TemplateID: template.ID, KeyID: keyID, RequestID: requestID})
 	if err != nil {
@@ -430,15 +430,7 @@ func (s *Server) reloadMinecraftInstanceProxy(ctx context.Context, worker plugin
 }
 
 func (s *Server) syncMinecraftProxy(ctx context.Context, worker pluginWorker, nodeID string, parent *auth.GameServer, excludeID string) error {
-	instances, err := s.Users.ListMinecraftInstances(ctx, nodeID)
-	if err != nil {
-		return err
-	}
-	servers, err := s.Users.ListGameServersForNode(ctx, nodeID)
-	if err != nil {
-		return err
-	}
-	resources, err := s.Users.ListMinecraftResources(ctx, nodeID)
+	instances, servers, resources, err := s.Users.MinecraftProxySnapshot(ctx, nodeID)
 	if err != nil {
 		return err
 	}
@@ -525,6 +517,51 @@ func minecraftKeyCanAccessInstance(key *auth.MinecraftAPIKey, instance auth.Mine
 	return key != nil && key.ID != "" && instance.KeyID == key.ID && instance.TemplateID == key.TemplateID
 }
 
+func minecraftKeyCanDelegateInstance(principal minecraftAPIPrincipal, instance auth.MinecraftInstance, server *auth.GameServer) bool {
+	key, node := principal.Key, principal.Node
+	return key != nil && node != nil && server != nil && key.ID != "" && key.UserID != "" &&
+		instance.KeyID == "" && instance.TemplateID == key.TemplateID && instance.ServerID == server.ID &&
+		key.NodeID == node.ID && server.NodeID == node.ID && server.CreatedByUserID == key.UserID &&
+		canManageNodeMinecraftLibrary(node.AccessRole)
+}
+
+func (s *Server) minecraftKeyCanManageInstance(ctx context.Context, principal minecraftAPIPrincipal, instance auth.MinecraftInstance, server *auth.GameServer) (bool, error) {
+	if minecraftKeyCanAccessInstance(principal.Key, instance) {
+		return true, nil
+	}
+	if !minecraftKeyCanDelegateInstance(principal, instance, server) {
+		return false, nil
+	}
+	template, err := s.Users.FindMinecraftResource(ctx, principal.Node.ID, instance.TemplateID)
+	if err != nil {
+		return false, err
+	}
+	var spec minecraftResourceSpec
+	if template == nil || template.Kind != "templates" || json.Unmarshal(template.Spec, &spec) != nil || spec.Mode != "minigames" || validateMinecraftMinigame(&spec) != nil {
+		return false, nil
+	}
+	metadata := parseGameServerMetadata(server.Metadata)
+	if spec.ParentID == "" || metadata.ParentServerID != spec.ParentID {
+		return false, nil
+	}
+	if metadata.MinecraftMode != "" {
+		return metadata.MinecraftMode == "minigames", nil
+	}
+	baseURL, apiKey, err := s.workerTargetFromNode(principal.Node)
+	if err != nil {
+		return false, err
+	}
+	config, err := readMinecraftMinigameConfig(ctx, pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, server)
+	if err != nil {
+		return false, nil
+	}
+	parent, err := s.Users.FindGameServerByRefForNode(ctx, principal.Node.ID, spec.ParentID)
+	if err != nil {
+		return false, err
+	}
+	return parent != nil && isVelocityServer(parent) && config.ControlURL == "http://"+velocityBackendHostForSlug(parent.Slug)+":25580", nil
+}
+
 func minecraftRequestInstance(key *auth.MinecraftAPIKey, instances []auth.MinecraftInstance, requestID string) *auth.MinecraftInstance {
 	if key == nil || key.ID == "" {
 		return nil
@@ -580,6 +617,10 @@ func (s *Server) handleDeleteMinecraftInstance(w http.ResponseWriter, r *http.Re
 	principal, api := r.Context().Value(minecraftAPIContextKey{}).(minecraftAPIPrincipal)
 	var node *auth.WorkerNode
 	if api {
+		if principal.Node == nil || principal.Key == nil {
+			writeError(w, http.StatusUnauthorized, "Minecraft API key required")
+			return
+		}
 		node = principal.Node
 	} else {
 		_, adminNode, ok := s.loadMinecraftAdmin(w, r)
@@ -602,21 +643,36 @@ func (s *Server) handleDeleteMinecraftInstance(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "Failed to load instances")
 		return
 	}
-	found := false
+	var found *auth.MinecraftInstance
 	for _, instance := range instances {
-		if instance.ServerID == id && (!api || minecraftKeyCanAccessInstance(principal.Key, instance)) {
-			found = true
+		if instance.ServerID == id {
+			found = &instance
 			break
 		}
 	}
-	if !found {
+	if found == nil {
 		writeError(w, http.StatusNotFound, "Instance not found")
 		return
 	}
 	server, err := s.Users.FindGameServerByRefForNode(ctx, node.ID, id)
-	if err != nil || server == nil {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to load instance")
+		return
+	}
+	if server == nil {
 		writeError(w, http.StatusNotFound, "Instance not found")
 		return
+	}
+	if api {
+		allowed, permissionErr := s.minecraftKeyCanManageInstance(ctx, principal, *found, server)
+		if permissionErr != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to verify instance permissions")
+			return
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, "API key cannot manage this instance; dashboard minigames require the same creator, template and node")
+			return
+		}
 	}
 	baseURL, apiKey, err := s.workerTargetFromNode(node)
 	if err != nil {
@@ -642,11 +698,6 @@ func (s *Server) handleDeleteMinecraftInstance(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusBadGateway, "Failed to unregister instance")
 			return
 		}
-		worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}
-		if err = s.syncMinecraftProxy(ctx, worker, node.ID, parent, server.ID); err != nil {
-			writeError(w, http.StatusBadGateway, "Failed to synchronize Velocity; instance remains stopped")
-			return
-		}
 	}
 	if err = s.workerDeletePath(ctx, baseURL, apiKey, server.RootPath, true); err != nil {
 		writeError(w, http.StatusBadGateway, "Failed to delete instance files")
@@ -655,6 +706,15 @@ func (s *Server) handleDeleteMinecraftInstance(w http.ResponseWriter, r *http.Re
 	if _, err = s.Users.DeleteGameServerByID(ctx, node.ID, server.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to delete instance record")
 		return
+	}
+	if parent != nil {
+		syncCtx, syncCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+		defer syncCancel()
+		worker := pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}
+		if err = s.syncMinecraftProxy(syncCtx, worker, node.ID, parent, ""); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{"error": "Instance deleted, but Velocity synchronization failed; retry proxy sync", "committed": true})
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

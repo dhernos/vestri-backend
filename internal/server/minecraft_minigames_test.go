@@ -59,7 +59,7 @@ func TestMinecraftMinigameValidation(t *testing.T) {
 	if err := validateMinecraftMinigame(&spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec.Minigame.LobbyMode != "vestri" || spec.Minigame.JoinTimeout != "20s" || spec.Minigame.Lifecycle.End.EmptyGrace != "10s" || spec.Minigame.Lifecycle.End.ReturnPlayersTo != "lobby" {
+	if spec.Minigame.InstanceMode != "temporary" || spec.Minigame.LobbyMode != "vestri" || spec.Minigame.JoinTimeout != "20s" || spec.Minigame.Lifecycle.End.EmptyGrace != "10s" || spec.Minigame.Lifecycle.End.ReturnPlayersTo != "lobby" {
 		t.Fatal("defaults not applied")
 	}
 	for _, test := range []struct {
@@ -71,6 +71,7 @@ func TestMinecraftMinigameValidation(t *testing.T) {
 		{"ordinary with spec", func(spec *minecraftResourceSpec) { spec.Mode = "player" }},
 		{"team action without teams", func(spec *minecraftResourceSpec) { spec.Minigame.Teams = nil }},
 		{"lobby mode", func(spec *minecraftResourceSpec) { spec.Minigame.LobbyMode = "native" }},
+		{"instance mode", func(spec *minecraftResourceSpec) { spec.Minigame.InstanceMode = "persistent" }},
 		{"plugin commands", func(spec *minecraftResourceSpec) { spec.Minigame.LobbyMode = "plugin" }},
 		{"zero team size", func(spec *minecraftResourceSpec) { spec.Minigame.TeamSize = 0 }},
 		{"duplicate", func(spec *minecraftResourceSpec) { spec.Minigame.Teams = []string{"red", "red"} }},
@@ -173,6 +174,56 @@ func TestMinecraftMinigameOptionalTeamsAndLobby(t *testing.T) {
 			test.edit(spec.Minigame)
 			if err := validateMinecraftMinigame(&spec); (err == nil) != test.valid {
 				t.Fatalf("valid=%t error=%v", test.valid, err)
+			}
+		})
+	}
+}
+
+func TestMinecraftMinigamePermanentInstances(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		edit  func(*minecraftMinigameSpec)
+		valid bool
+	}{
+		{"persistent pool", func(game *minecraftMinigameSpec) {}, true},
+		{"on demand", func(game *minecraftMinigameSpec) { game.ReadyServers = 0 }, true},
+		{"vestri lobby", func(game *minecraftMinigameSpec) { game.LobbyMode = "vestri" }, false},
+		{"default lobby", func(game *minecraftMinigameSpec) { game.LobbyMode = "" }, false},
+		{"delete", func(game *minecraftMinigameSpec) { game.Lifecycle.End.DeleteServer = true }, false},
+		{"empty end", func(game *minecraftMinigameSpec) { game.Lifecycle.End.WhenEmpty = true }, false},
+		{"log end", func(game *minecraftMinigameSpec) { game.Lifecycle.End.LogPattern = "^END$" }, false},
+		{"temporary without delete", func(game *minecraftMinigameSpec) { game.InstanceMode = "temporary" }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec := testMinecraftMinigameSpec(t)
+			game := spec.Minigame
+			game.InstanceMode, game.LobbyMode = "permanent", "plugin"
+			game.Lifecycle.OnAllJoined = nil
+			game.Lifecycle.End.DeleteServer, game.Lifecycle.End.WhenEmpty = false, false
+			game.Lifecycle.End.LogPattern = ""
+			test.edit(game)
+			if err := validateMinecraftMinigame(&spec); (err == nil) != test.valid {
+				t.Fatalf("valid=%t error=%v", test.valid, err)
+			}
+			if !test.valid {
+				return
+			}
+			files := map[string]string{}
+			worker, _ := minecraftMinigameTestWorker(t, files, false)
+			instance := auth.GameServer{ID: "instance", Slug: "instance", RootPath: "instance", Metadata: json.RawMessage(`{"parentServerId":"proxy"}`)}
+			parent := &auth.GameServer{ID: "proxy", Slug: "proxy"}
+			spec.ParentID = parent.ID
+			if err := provisionMinecraftMinigame(context.Background(), worker, &instance, parent, &spec, false); err != nil {
+				t.Fatal(err)
+			}
+			config, err := readMinecraftMinigameConfig(context.Background(), worker, &instance)
+			if err != nil || config.Spec.InstanceMode != "permanent" {
+				t.Fatal("saved permanent mode lost", err)
+			}
+			raw, _ := json.Marshal(spec)
+			manifest, err := buildMinecraftProxyManifest(context.Background(), worker, parent, []auth.MinecraftResource{{ID: "template", Kind: "templates", Name: "Persistent", Spec: raw}}, []auth.MinecraftInstance{{ServerID: instance.ID, TemplateID: "template"}}, []auth.GameServer{instance}, "")
+			if err != nil || strings.Count(string(manifest), `"instanceMode":"permanent"`) != 2 {
+				t.Fatal("current or pinned permanent manifest contract lost", err)
 			}
 		})
 	}
@@ -516,6 +567,7 @@ func TestMinecraftMinigameLegacyLobby(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(legacy["spec"].(map[string]interface{}), "lobbyMode")
+	delete(legacy["spec"].(map[string]interface{}), "instanceMode")
 	encoded, err := json.Marshal(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -531,7 +583,7 @@ func TestMinecraftMinigameLegacyLobby(t *testing.T) {
 		t.Fatal("retry rewrote legacy config to the current lobby mode")
 	}
 	config, err := readMinecraftMinigameConfig(ctx, worker, instance)
-	if err != nil || config.Spec.LobbyMode != "vestri" || len(config.Spec.Lifecycle.OnAllJoined) != 1 {
+	if err != nil || config.Spec.InstanceMode != "temporary" || config.Spec.LobbyMode != "vestri" || len(config.Spec.Lifecycle.OnAllJoined) != 1 {
 		t.Fatalf("legacy lobby or startup actions lost: %+v (%v)", config, err)
 	}
 }
@@ -682,11 +734,15 @@ func TestMinecraftMinigameManifest(t *testing.T) {
 			t.Fatal(err)
 		}
 		var manifest struct {
-			Minigames map[string]map[string]interface{} `json:"minigames"`
-			Servers   map[string]map[string]interface{} `json:"servers"`
+			Authoritative bool                              `json:"authoritative"`
+			Minigames     map[string]map[string]interface{} `json:"minigames"`
+			Servers       map[string]map[string]interface{} `json:"servers"`
 		}
 		if err := json.Unmarshal(rawManifest, &manifest); err != nil {
 			t.Fatal(err)
+		}
+		if manifest.Authoritative != (excluded == "") {
+			t.Fatal("incorrect manifest authority for exclusion")
 		}
 		if len(manifest.Minigames) != 2 || manifest.Minigames["No Instances Yet"] == nil || manifest.Minigames["Team Game"]["maxInstances"] != float64(5) || manifest.Minigames["Team Game"]["joinTimeout"] != "30s" || manifest.Minigames["Team Game"]["maxPlayers"] != float64(6) {
 			t.Fatal("wrong template scope or flattened minigame contract")

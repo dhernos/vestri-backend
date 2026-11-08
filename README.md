@@ -21,6 +21,7 @@ Example template spec (use existing base/proxy resource IDs):
   "maxInstances": 3,
   "mode": "minigames",
   "minigame": {
+    "instanceMode": "temporary",
     "lobbyMode": "vestri",
     "teams": ["red", "blue"],
     "teamSize": 2,
@@ -46,12 +47,22 @@ Example template spec (use existing base/proxy resource IDs):
 }
 ```
 
+- `instanceMode`: optional string, defaults to `temporary`; only `temporary`
+  and `permanent` are accepted. Missing fields in legacy templates and saved
+  instance configs normalize to `temporary`. Permanent instances require
+  `lobbyMode: "plugin"`, `end.deleteServer: false`, `end.whenEmpty: false`,
+  and an empty/omitted `end.logPattern`. Invalid combinations are rejected,
+  not silently normalized. They persist across game ends and empty periods;
+  compatible coordinators and Paper agents must ignore explicit end signals
+  for permanent instances. The backend transports this contract but does not
+  implement agent or coordinator execution.
 - `lobbyMode`: optional string, defaults to `vestri`; only `vestri` and
   `plugin` are accepted. `vestri` uses Vestri's minimum-player wait and
   `onAllJoined` startup actions. `plugin` delegates the lobby/start decision to
   the game plugin: Vestri does not wait for `minPlayers` or execute `onAllJoined`.
   Nonempty `onAllJoined` is therefore rejected in plugin mode, not silently
-  ignored; send `[]` (the frontend default). Readiness and ending still apply.
+  ignored; send `[]`. Readiness still applies; ending applies to temporary
+  instances only.
 - `teams`: optional, omitted/null/`[]` all normalize to `[]` for free-for-all
   games. Nonempty arrays contain at most 100 unique, case-sensitive identifiers matching
   `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. `returnPlayersTo` uses the same identifier
@@ -65,7 +76,12 @@ Example template spec (use existing base/proxy resource IDs):
   negative or greater-than-100 values are rejected. Native lobbies may still
   declare teams; identifier, size, and capacity validation is unchanged.
 - `readyServers`: integer 0 through template `maxInstances` (itself 1-100);
-  omitted means 0. `joinTimeout` defaults to `20s`; `emptyGrace` defaults to
+  omitted means 0. For temporary instances it is the desired spare ready-pool
+  count, not the total active count. For permanent instances it is the minimum
+  persistent instance count, including active instances, within the same cap;
+  zero enables on-demand creation without a prewarmed minimum. These are
+  coordinator semantics, not a backend provisioning loop.
+  `joinTimeout` defaults to `20s`; `emptyGrace` defaults to
   `10s`. Both use Go duration strings and must be between `1s` and `10m`
   inclusive, with whole-millisecond precision. Validated values normalize to
   canonical Go duration strings (`20s`, `1m20s`, `1.5s`, `1.001s`), compatible
@@ -88,7 +104,9 @@ Example template spec (use existing base/proxy resource IDs):
   This is not a complete Java regex verifier or a Java execution-time bound;
   avoid pathological nested repetition and test patterns in the plugin runtime.
 - `end.whenEmpty` is boolean (omitted means false); `end.deleteServer` must
-  explicitly be `true`. The backend validates and transports lifecycle rules;
+  explicitly be `true` for temporary instances and must be `false` for permanent
+  instances. Permanent instances also require `whenEmpty: false` and an empty
+  `logPattern`, since game ends are ignored. The backend validates and transports lifecycle rules;
   executing commands, readiness, transfers, end detection, and deletion remains
   the plugin's responsibility.
 
@@ -116,6 +134,19 @@ Use `explicit` readiness instead when the game plugin must finish initialization
 before accepting players. `plugin` mode does not remove the readiness signal,
 join timeout, maximum-player limit, ready pool, or configured end lifecycle.
 
+For a permanent plugin-lobby server, use the same native block with
+`"instanceMode": "permanent"`, `"end": {"whenEmpty": false,
+"deleteServer": false}` and no `logPattern`. Set `readyServers` to the desired
+minimum persistent instance count, or `0` for on-demand servers. Deploy compatible
+proxy and Paper agents before using this mode; an older agent may still end or
+delete these instances. Current compatible agents/coordinators preserve permanent
+instances across ends, empty periods, and proxy/Paper restarts. Offline recovery
+is supported through persisted match/roster reservations and fresh matching
+agent reports and roster acknowledgements, not automatic player reconnection
+or restoration of the gameplay plugin's own state. Failures make an instance
+unavailable or release failed admissions rather than automatically deleting it;
+explicit authorized dashboard deletion remains available.
+
 Before instance startup, the backend writes
 `<instance root>/data/plugins/VestriConsoleBridge/minigame.json` containing
 `{slug, token, controlUrl, spec, spawnRequestId?}`. Optional `spawnRequestId` is
@@ -136,7 +167,7 @@ Fresh minigame spawns always replace copied `server.properties` player limits
 with `max-players=spec.minigame.maxPlayers`. Ordinary player limits are unchanged;
 saved-request retries do not rewrite server properties.
 
-Proxy synchronization writes top-level `minigames` alongside `servers` in
+Proxy synchronization writes top-level `authoritative`, `minigames`, and `servers` in
 `vestri-dynamic-servers.json`. `minigames` maps the exact template **name** to
 the flattened minigame spec plus `maxInstances`, includes templates with no
 instances, and only includes minigame templates for that parent proxy. Server
@@ -150,17 +181,39 @@ unchanged. When present in the instance config, `spawnRequestId` is also include
 in the private minigame server entry so the proxy can correlate its local caller
 UUID before the spawn response arrives. Legacy configs omit this field until
 backfilled by a saved-request retry. Neither tokens nor `spawnRequestId` are
-added to public spawn responses. Excluded/deleting instances are omitted.
+added to public spawn responses.
+
+Manifest authority has these exact semantics:
+
+- `authoritative: true` only when synchronization uses `excludeID == ""` and
+  successfully loads a complete, consistent node-wide database snapshot of
+  instances, servers, and resources in one read-only repeatable-read transaction.
+  The `servers` map is scoped to the selected parent proxy and includes both
+  ordinary dynamic and minigame instances. Static/non-instance servers are not
+  part of this reconciliation contract. For that proxy, a previously tracked
+  dynamic server absent from a true-authority manifest can be reconciled as
+  removed. Surviving minigame configs must also validate before publication.
+- `authoritative: false` whenever `excludeID != ""`. That instance is omitted,
+  but this may be precommit exclusion, not a committed deletion. Coordinators
+  must not infer deletion from absence in such a manifest. Missing authority
+  in legacy manifests must likewise not authorize absence-based deletion.
+- Query/scan/transaction errors, incomplete instance/server records, invalid
+  metadata, or missing/corrupt surviving minigame configs abort synchronization
+  before writing a manifest or reloading Velocity. No partial snapshot is
+  published as authoritative. There is no `pendingDeletion` or deleted-ID list;
+  committed deletion is represented by absence in a complete authoritative map.
+
 The top-level `maxInstances` value within each minigame entry remains the template
-cap, and `readyServers` remains the desired ready-pool count within that cap.
+cap, and `readyServers` has the mode-dependent pool/minimum semantics above.
 Each private `servers[slug].spec` has the same flattened shape as
 `minigames[templateName]`: inline minigame fields plus `maxInstances`, with no
 extra `minigame` wrapper, hash, or version. Its minigame fields come from the saved
 spawn-time instance `config.Spec`; only `maxInstances` uses the current template
 cap. The top-level template entry continues to contain the current template spec.
-Both shapes serialize normalized `lobbyMode` and `teams: []`; old templates and
-saved instance configs without `lobbyMode` normalize to `vestri`. Retry does not
-change a saved instance's lobby mode or teams to match an edited template.
+Both shapes serialize normalized `instanceMode`, `lobbyMode`, and `teams: []`;
+old templates and saved instance configs without these modes normalize to
+`temporary` and `vestri`. Retry does not change a saved instance's modes or
+teams to match an edited template.
 The proxy can persist `target.spec` in its per-instance ledger and compare raw
 specs to drain mismatched ready instances, while active instances retain their
 original lifecycle. Ordinary server entries omit `spec`. This is a transport
@@ -179,6 +232,76 @@ proxy ID or slug). This regenerates the manifest and reloads the proxy, returnin
 HTTP 204 on success; it does not spawn instances or change API keys.
 Do not repeat creation or deletion. Until sync succeeds, discovery may
 be stale. There is no automatic retry queue.
+
+Dynamic instance deletion, including dashboard server deletion, stops and
+unregisters the instance, deletes its files, then deletes its database server
+record (which cascades to `MinecraftInstance`). Dashboard and exact-key deletion
+do not read minigame template/instance configs to gate that deletion. Delegated
+API deletion first verifies the narrow contract below. Only after the database deletion
+commits does it synchronize the parent using `excludeID == ""`, with a separate
+30-second context independent of request cancellation. Thus the removed instance
+is absent from the authoritative postcommit manifest, rather than temporarily
+excluded from a precommit snapshot. A corrupt surviving config can fail this
+final sync, but cannot undo or block the already-committed deletion.
+
+Successful deletion returns HTTP 204. Postcommit synchronization failure returns
+HTTP 502 with `{"error":"Instance deleted, but Velocity synchronization failed;
+retry proxy sync","committed":true}`. Files and database records remain deleted;
+the response must not be treated as evidence that the server still exists.
+Recover with the same owner/admin proxy sync endpoint above. No destructive
+rollback or recreation is attempted. Precommit failures do not report
+`committed: true`; database/worker verification errors are not treated as absence.
+With a valid authorized API key, `DELETE /api/minecraft/v1/instances/{instanceId}`
+returns HTTP 404 for an absent instance (including a retry after committed
+deletion), so clients may treat that result as `deleteIfPresent` success. A known
+instance belonging to another key returns HTTP 403, even for the same template.
+Authentication/permission/rate-limit failures keep their existing status codes.
+
+### Dashboard Minigame Delegation
+
+Known-ID API `DELETE`, `POST .../start`, and `POST .../stop` also permit a
+dashboard-created minigame (`MinecraftInstance.keyId` empty) only when the key's
+user is exactly `GameServer.createdByUserId`, the template IDs match, and both
+key and instance belong to the middleware's currently authorized node. Every
+request revalidates the key owner's current node owner/admin permission. This
+does not grant all template keys authority over all dashboard administrators'
+instances. A different creator account still receives HTTP 403; a different
+node sees HTTP 404 because instance lookup is node-scoped.
+
+The template must still be a valid minigame template bound to the instance's
+parent proxy. New spawns persist `metadata.minecraftMode`; ordinary instances
+cannot become delegated merely by changing their template mode. Legacy instances
+without that marker require a valid saved minigame configuration bound to the
+same node's Velocity proxy. Missing/corrupt legacy configuration fails closed.
+New minigames can be deleted even if their runtime configuration is damaged.
+
+Exact-key instance isolation is unchanged, including keys from the same account.
+Ordinary dashboard instances remain excluded. API list and request-ID lookup
+remain exact-key-only: cleanup uses the known instance ID directly, not a list or
+a key-hashed dashboard spawn request. No `managedByProxy` authority flag is
+published: the manifest cannot establish the identity of the proxy's configured
+credential. A proxy must rely on the authenticated lifecycle result.
+
+This same-creator delegation lets an adopted manual/web **MINIGAME** instance
+be cleaned up with the matching creator's template key; it does not adopt
+ordinary servers, grant player access, or authorize a different creator's key.
+Manual instances are tracked independently rather than merged with a pending
+spawn just because their templates match. For native `lobbyMode: "plugin"`, a
+direct join or console `--send-player` admits the whole permitted party to the
+exact requested instance only after a fresh agent report and acknowledgement of
+the matching match ID and full-roster `rosterVersion`; a status ping cannot
+bypass admission. Managed `lobbyMode: "vestri"` uses the template queue and
+`minPlayers` threshold instead, without forcing entry to the manually spawned
+instance. These are compatible proxy/Paper runtime behaviors, not backend
+transfers or roster assignment.
+
+Deletion regressions run against a disposable PostgreSQL database and Redis:
+
+```sh
+VESTRI_VELOCITY_TEST_DATABASE_URL='<PostgreSQL URL>' \
+VESTRI_MINECRAFT_TEST_REDIS_ADDR='127.0.0.1:6379' \
+go test ./internal/server -run TestMinecraftMinigame -count=1
+```
 
 The plugin's existing `vestri-dynamic-config.json` **`templates` map from names
 to template-scoped API keys remains manual user configuration**. Automatic
@@ -199,6 +322,29 @@ only validates/transports these fields; an older JAR cannot implement the native
 lobby behavior. No database migration or worker code change is required for this
 contract. Resynchronize the proxy after deployment or template changes using the
 protected sync endpoint above.
+
+Update both Paper template JARs and current Paper instance JARs, then restart
+affected servers; updating only the proxy or template does not upgrade a running
+instance. Deploy the updated frontend for regenerated template specs and verify
+the intended `instanceMode` and lifecycle before spawning. Existing instances
+and saved-request retries retain their pinned spawn-time spec copy, so a
+template edit, regenerated spec, or JAR update cannot change their mode in place.
+Recreate an incompatible instance with the intended spec after authorized
+evacuation/deletion; compatible permanent instances can recover with their
+original durable files instead of always being recreated.
+
+The proxy's protected `plugins/vestri-dynamic/vestri-minigames.json` ledger stores
+the original API origin (`backendUrl`, including any deployment prefix) and
+template API key for preparation retries, lookup, and cleanup. Current config
+changes do not replace that pinned binding or transfer backend ownership. Treat
+the ledger and backups as credentials: use POSIX `0600` files and a `0700`
+directory. Legacy unknown-credential records stay tracked and fail closed, not
+silently forgotten or reassigned to a current key. Recover original credentials
+or use authorized dashboard deletion followed by authoritative proxy sync.
+Live retry/cleanup failures may be rooted in that saved origin or key, including
+expiry, revocation, creator/node permissions, or template mismatch; a working
+current key does not establish that the original key works. Diagnose with HTTP
+status and correlated sanitized logs without exposing credentials.
 
 `VESTRI_DYNAMIC_SYNC_OK` is not a successful spawn response. Fresh spawn first
 writes the proxy manifest and reloads Velocity as a preflight, then copies the
@@ -249,6 +395,11 @@ Set `VESTRI_VELOCITY_TEST_DATABASE_URL` to a disposable PostgreSQL URL to also r
 the isolated-schema discovery regression: brand-new templates with zero instances,
 deleted template removal, cancellation-independent post-commit sync, and retained
 resources/retry after a proxy reload failure.
+
+These regression descriptions and deployment instructions are not a claim of
+live testing. Verify manual/web adoption and cleanup authorization, exact native
+admission, managed queueing, private agent connectivity, and permanent offline
+restart recovery on the deployment before opening queues to players.
 
 ## Notifications
 

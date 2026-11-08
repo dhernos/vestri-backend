@@ -18,6 +18,7 @@ import (
 )
 
 type minecraftMinigameSpec struct {
+	InstanceMode string                     `json:"instanceMode,omitempty"`
 	LobbyMode    string                     `json:"lobbyMode,omitempty"`
 	Teams        []string                   `json:"teams"`
 	TeamSize     int                        `json:"teamSize"`
@@ -73,6 +74,15 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 	if game.LobbyMode != "vestri" && game.LobbyMode != "plugin" {
 		return fmt.Errorf("lobbyMode must be vestri or plugin")
 	}
+	if game.InstanceMode == "" {
+		game.InstanceMode = "temporary"
+	}
+	if game.InstanceMode != "temporary" && game.InstanceMode != "permanent" {
+		return fmt.Errorf("instanceMode must be temporary or permanent")
+	}
+	if game.InstanceMode == "permanent" && game.LobbyMode != "plugin" {
+		return fmt.Errorf("permanent instanceMode requires plugin lobbyMode")
+	}
 	if len(game.Teams) > 100 {
 		return fmt.Errorf("teams must contain at most 100 identifiers")
 	}
@@ -122,8 +132,11 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 			return err
 		}
 	}
-	if !lifecycle.End.DeleteServer {
-		return fmt.Errorf("end.deleteServer must be true")
+	if game.InstanceMode == "temporary" && !lifecycle.End.DeleteServer {
+		return fmt.Errorf("end.deleteServer must be true for temporary instances")
+	}
+	if game.InstanceMode == "permanent" && (lifecycle.End.DeleteServer || lifecycle.End.WhenEmpty || lifecycle.End.LogPattern != "") {
+		return fmt.Errorf("permanent instances require end.deleteServer false, end.whenEmpty false and empty end.logPattern")
 	}
 	if err := defaultMinecraftMinigameDuration(&lifecycle.End.EmptyGrace, "10s"); err != nil {
 		return fmt.Errorf("end.emptyGrace: %w", err)
@@ -348,17 +361,34 @@ func buildMinecraftProxyManifest(ctx context.Context, worker pluginWorker, paren
 		minigames[resource.Name] = minecraftMinigameManifestSpec{minecraftMinigameSpec: *spec.Minigame, MaxInstances: spec.MaxInstances}
 	}
 	dynamic := map[string]auth.MinecraftInstance{}
+	serverIDs := map[string]bool{}
+	for _, server := range servers {
+		serverIDs[server.ID] = true
+	}
 	for _, instance := range instances {
 		if instance.ServerID != excludeID {
+			if !serverIDs[instance.ServerID] {
+				return nil, fmt.Errorf("Minecraft instance snapshot is incomplete")
+			}
 			dynamic[instance.ServerID] = instance
 		}
 	}
 	targets := map[string]interface{}{}
 	for _, server := range servers {
 		instance, found := dynamic[server.ID]
-		metadata := parseGameServerMetadata(server.Metadata)
-		if !found || metadata.ParentServerID != parent.ID {
+		if !found {
 			continue
+		}
+		var checkedMetadata gameServerStoredMetadata
+		if json.Unmarshal(server.Metadata, &checkedMetadata) != nil || checkedMetadata.ParentServerID == "" {
+			return nil, fmt.Errorf("invalid Minecraft instance metadata")
+		}
+		metadata := parseGameServerMetadata(server.Metadata)
+		if metadata.ParentServerID != parent.ID {
+			continue
+		}
+		if _, duplicate := targets[server.Slug]; duplicate {
+			return nil, fmt.Errorf("duplicate Minecraft instance slug")
 		}
 		target := map[string]interface{}{"name": minecraftInstanceProxyName(&server), "host": metadata.ConnectHost, "port": metadata.ConnectPort}
 		if template, minigame := templates[instance.TemplateID]; minigame {
@@ -378,5 +408,5 @@ func buildMinecraftProxyManifest(ctx context.Context, worker pluginWorker, paren
 		}
 		targets[server.Slug] = target
 	}
-	return json.Marshal(map[string]interface{}{"servers": targets, "minigames": minigames})
+	return json.Marshal(map[string]interface{}{"authoritative": excludeID == "", "servers": targets, "minigames": minigames})
 }

@@ -81,6 +81,7 @@ type gameServerStoredMetadata struct {
 	SoftwareVersion    string                         `json:"softwareVersion,omitempty"`
 	GameVersion        string                         `json:"gameVersion,omitempty"`
 	Kind               string                         `json:"kind,omitempty"`
+	MinecraftMode      string                         `json:"minecraftMode,omitempty"`
 	ParentServerID     string                         `json:"parentServerId,omitempty"`
 	VelocityNetwork    string                         `json:"velocityNetwork,omitempty"`
 	VelocityServerName string                         `json:"velocityServerName,omitempty"`

@@ -71,7 +71,11 @@ func createGameServer(ctx context.Context, db gameServerInsertStore, params Crea
 }
 
 func (r *UserRepository) ListGameServersForNode(ctx context.Context, nodeID string) ([]GameServer, error) {
-	rows, err := r.DB.Query(ctx, `
+	return listGameServersForNode(ctx, r.DB, nodeID)
+}
+
+func listGameServersForNode(ctx context.Context, db minecraftSnapshotStore, nodeID string) ([]GameServer, error) {
+	rows, err := db.Query(ctx, `
 		SELECT "id","nodeId","slug","name","templateId","templateVersion","stackName","rootPath","composePath","metadata","createdByUserId","createdAt","updatedAt"
 		FROM "GameServer"
 		WHERE "nodeId"=$1

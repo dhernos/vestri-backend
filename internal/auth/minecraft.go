@@ -38,7 +38,15 @@ type MinecraftInstance struct {
 }
 
 func (r *UserRepository) ListMinecraftResources(ctx context.Context, nodeID string) ([]MinecraftResource, error) {
-	rows, err := r.DB.Query(ctx, `SELECT "id","nodeId","kind","name","spec","createdAt" FROM "MinecraftResource" WHERE "nodeId"=$1 ORDER BY "name"`, nodeID)
+	return listMinecraftResources(ctx, r.DB, nodeID)
+}
+
+type minecraftSnapshotStore interface {
+	Query(context.Context, string, ...interface{}) (pgx.Rows, error)
+}
+
+func listMinecraftResources(ctx context.Context, db minecraftSnapshotStore, nodeID string) ([]MinecraftResource, error) {
+	rows, err := db.Query(ctx, `SELECT "id","nodeId","kind","name","spec","createdAt" FROM "MinecraftResource" WHERE "nodeId"=$1 ORDER BY "name"`, nodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +118,11 @@ func (r *UserRepository) RevokeMinecraftAPIKey(ctx context.Context, nodeID, id s
 }
 
 func (r *UserRepository) ListMinecraftInstances(ctx context.Context, nodeID string) ([]MinecraftInstance, error) {
-	rows, err := r.DB.Query(ctx, `SELECT "serverId","templateId",COALESCE("keyId",''),"requestId","createdAt" FROM "MinecraftInstance" WHERE "nodeId"=$1 ORDER BY "createdAt" DESC`, nodeID)
+	return listMinecraftInstances(ctx, r.DB, nodeID)
+}
+
+func listMinecraftInstances(ctx context.Context, db minecraftSnapshotStore, nodeID string) ([]MinecraftInstance, error) {
+	rows, err := db.Query(ctx, `SELECT "serverId","templateId",COALESCE("keyId",''),"requestId","createdAt" FROM "MinecraftInstance" WHERE "nodeId"=$1 ORDER BY "createdAt" DESC`, nodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +136,30 @@ func (r *UserRepository) ListMinecraftInstances(ctx context.Context, nodeID stri
 		instances = append(instances, instance)
 	}
 	return instances, rows.Err()
+}
+
+func (r *UserRepository) MinecraftProxySnapshot(ctx context.Context, nodeID string) ([]MinecraftInstance, []GameServer, []MinecraftResource, error) {
+	transaction, err := r.DB.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer transaction.Rollback(ctx)
+	instances, err := listMinecraftInstances(ctx, transaction, nodeID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	servers, err := listGameServersForNode(ctx, transaction, nodeID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	resources, err := listMinecraftResources(ctx, transaction, nodeID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return nil, nil, nil, err
+	}
+	return instances, servers, resources, nil
 }
 
 func (r *UserRepository) CreateMinecraftGameInstance(ctx context.Context, params CreateGameServerParams, instance MinecraftInstance) (*GameServer, error) {

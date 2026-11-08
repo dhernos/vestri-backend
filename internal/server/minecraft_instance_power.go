@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"yourapp/internal/auth"
 )
 
 func (s *Server) handleStartMinecraftInstance(w http.ResponseWriter, r *http.Request) {
@@ -36,20 +37,29 @@ func (s *Server) handleMinecraftInstancePower(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "Failed to load instances")
 		return
 	}
-	found := false
+	var found *auth.MinecraftInstance
 	for _, instance := range instances {
-		if instance.ServerID == id && minecraftKeyCanAccessInstance(principal.Key, instance) {
-			found = true
+		if instance.ServerID == id {
+			found = &instance
 			break
 		}
 	}
-	if !found {
+	if found == nil {
 		writeError(w, http.StatusNotFound, "Instance not found")
 		return
 	}
 	instance, err := s.Users.FindGameServerByRefForNode(ctx, principal.Node.ID, id)
 	if err != nil || instance == nil {
 		writeError(w, http.StatusNotFound, "Instance not found")
+		return
+	}
+	allowed, err := s.minecraftKeyCanManageInstance(ctx, principal, *found, instance)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to verify instance permissions")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "API key cannot manage this instance; dashboard minigames require the same creator, template and node")
 		return
 	}
 	baseURL, apiKey, err := s.workerTargetFromNode(principal.Node)
