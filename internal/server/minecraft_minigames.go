@@ -18,6 +18,7 @@ import (
 )
 
 type minecraftMinigameSpec struct {
+	LobbyMode    string                     `json:"lobbyMode,omitempty"`
 	Teams        []string                   `json:"teams"`
 	TeamSize     int                        `json:"teamSize"`
 	MinPlayers   int                        `json:"minPlayers"`
@@ -66,8 +67,17 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 	if game == nil {
 		return fmt.Errorf("minigame is required for mode minigames")
 	}
-	if len(game.Teams) < 1 || len(game.Teams) > 100 {
-		return fmt.Errorf("teams must contain 1-100 identifiers")
+	if game.LobbyMode == "" {
+		game.LobbyMode = "vestri"
+	}
+	if game.LobbyMode != "vestri" && game.LobbyMode != "plugin" {
+		return fmt.Errorf("lobbyMode must be vestri or plugin")
+	}
+	if len(game.Teams) > 100 {
+		return fmt.Errorf("teams must contain at most 100 identifiers")
+	}
+	if game.Teams == nil {
+		game.Teams = []string{}
 	}
 	seen := map[string]bool{}
 	for _, team := range game.Teams {
@@ -76,8 +86,14 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 		}
 		seen[team] = true
 	}
-	if game.TeamSize < 1 || game.TeamSize > 100 || game.MinPlayers < 1 || game.MinPlayers > 100 || game.MaxPlayers < 1 || game.MaxPlayers > 100 || game.MinPlayers > game.MaxPlayers || game.MaxPlayers > len(game.Teams)*game.TeamSize {
-		return fmt.Errorf("teamSize and player limits must be 1-100 with minPlayers <= maxPlayers <= teams * teamSize")
+	if game.TeamSize < 0 || game.TeamSize > 100 || (len(game.Teams) > 0 && game.TeamSize == 0) {
+		return fmt.Errorf("teamSize must be 1-100 with teams, or 0-100 without teams")
+	}
+	if game.MinPlayers < 1 || game.MinPlayers > 100 || game.MaxPlayers < 1 || game.MaxPlayers > 100 || game.MinPlayers > game.MaxPlayers {
+		return fmt.Errorf("player limits must be 1-100 with minPlayers <= maxPlayers")
+	}
+	if len(game.Teams) > 0 && game.MaxPlayers > len(game.Teams)*game.TeamSize {
+		return fmt.Errorf("maxPlayers must not exceed teams * teamSize")
 	}
 	if game.ReadyServers < 0 || game.ReadyServers > spec.MaxInstances {
 		return fmt.Errorf("readyServers must be between 0 and maxInstances")
@@ -92,10 +108,16 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 	if len(lifecycle.OnAllJoined) > 100 {
 		return fmt.Errorf("onAllJoined is limited to 100 commands")
 	}
+	if game.LobbyMode == "plugin" && len(lifecycle.OnAllJoined) > 0 {
+		return fmt.Errorf("onAllJoined must be empty in plugin lobby mode")
+	}
 	if lifecycle.OnAllJoined == nil {
 		lifecycle.OnAllJoined = []minecraftMinigameCommand{}
 	}
 	for _, command := range lifecycle.OnAllJoined {
+		if len(game.Teams) == 0 && (command.ForEach == "team" || strings.Contains(command.Command, "{team}")) {
+			return fmt.Errorf("team repetition and {team} require nonempty teams")
+		}
 		if err := validateMinecraftMinigameCommand(command); err != nil {
 			return err
 		}
@@ -207,9 +229,26 @@ type minecraftMinigameConfig struct {
 
 var minecraftMinigameToken = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+type minecraftMinigameFileError struct {
+	operation string
+	file      string
+	cause     error
+}
+
+func (failure *minecraftMinigameFileError) Error() string {
+	return "failed to " + failure.operation + " " + failure.file
+}
+
+func (failure *minecraftMinigameFileError) Unwrap() error {
+	return failure.cause
+}
+
 func readMinecraftMinigameConfig(ctx context.Context, worker pluginWorker, server *auth.GameServer) (*minecraftMinigameConfig, error) {
 	content, missing, err := worker.server.workerReadFileOptional(ctx, worker.baseURL, worker.apiKey, path.Join(server.RootPath, minecraftMinigameConfigRelativePath))
-	if err != nil || missing {
+	if err != nil {
+		return nil, &minecraftMinigameFileError{"read", minecraftMinigameConfigRelativePath, err}
+	}
+	if missing {
 		return nil, fmt.Errorf("minigame configuration is unavailable")
 	}
 	var config minecraftMinigameConfig
@@ -238,11 +277,14 @@ func provisionMinecraftMinigame(ctx context.Context, worker pluginWorker, server
 	}
 	if !retry {
 		if err := worker.server.workerDeletePath(ctx, worker.baseURL, worker.apiKey, path.Join(server.RootPath, minecraftMinigameExecutionRelativePath), false); err != nil {
-			return fmt.Errorf("failed to remove copied minigame execution state")
+			return &minecraftMinigameFileError{"delete", minecraftMinigameExecutionRelativePath, err}
 		}
 	}
 	if spec.Mode != "minigames" {
-		return worker.server.workerDeletePath(ctx, worker.baseURL, worker.apiKey, filename, false)
+		if err := worker.server.workerDeletePath(ctx, worker.baseURL, worker.apiKey, filename, false); err != nil {
+			return &minecraftMinigameFileError{"delete", minecraftMinigameConfigRelativePath, err}
+		}
+		return nil
 	}
 	if parent == nil || spec.Minigame == nil {
 		return fmt.Errorf("minigame requires a proxy and spec")
@@ -263,7 +305,7 @@ func provisionMinecraftMinigame(ctx context.Context, worker pluginWorker, server
 				return err
 			}
 			if err := worker.server.workerWriteFile(ctx, worker.baseURL, worker.apiKey, filename, string(content)); err != nil {
-				return fmt.Errorf("failed to write minigame configuration")
+				return &minecraftMinigameFileError{"write", minecraftMinigameConfigRelativePath, err}
 			}
 		}
 		return nil
@@ -277,7 +319,7 @@ func provisionMinecraftMinigame(ctx context.Context, worker pluginWorker, server
 		return err
 	}
 	if err := worker.server.workerWriteFile(ctx, worker.baseURL, worker.apiKey, filename, string(content)); err != nil {
-		return fmt.Errorf("failed to write minigame configuration")
+		return &minecraftMinigameFileError{"write", minecraftMinigameConfigRelativePath, err}
 	}
 	return nil
 }

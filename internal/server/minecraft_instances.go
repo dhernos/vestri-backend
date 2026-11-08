@@ -214,6 +214,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 				}
 			}
 			if err = provisionMinecraftMinigame(ctx, pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, server, retryParent, &spec, true, request.RequestID); err != nil {
+				logMinecraftPreparationFailure(ctx, "minigame_config", node.ID, request.RequestID, server, true, err)
 				writeError(w, http.StatusBadGateway, "Failed to prepare instance minigame configuration")
 				return
 			}
@@ -259,6 +260,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 	whitelistEnabled := velocityBackendWhitelistEnabled(hasBackends)
 	parentMetadata := parseGameServerMetadata(parent.Metadata)
 	if err = s.syncMinecraftProxy(ctx, pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, node.ID, parent, ""); err != nil {
+		logMinecraftPreparationFailure(ctx, "proxy_preflight", node.ID, request.RequestID, parent, false, err)
 		writeError(w, http.StatusBadGateway, "Velocity bridge is unavailable; install Vestri Dynamic Servers and start the proxy")
 		return
 	}
@@ -296,6 +298,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if err = provisionMinecraftMinigame(ctx, worker, &auth.GameServer{Slug: slug, RootPath: slug}, parent, &spec, false, request.RequestID); err != nil {
+		logMinecraftPreparationFailure(ctx, "minigame_config", node.ID, request.RequestID, &auth.GameServer{StackName: slug}, false, err)
 		writeError(w, http.StatusBadGateway, "Failed to prepare instance minigame configuration")
 		return
 	}
@@ -404,6 +407,16 @@ func logMinecraftInstanceFailure(ctx context.Context, stage, nodeID string, serv
 	log.Printf("minecraft instance post_commit_failure stage=%s node=%q server=%q stack=%q retry=%t error_class=%s error_type=%T context_error=%v", stage, nodeID, server.ID, server.StackName, retry, minecraftInstanceErrorClass(err), err, ctx.Err())
 }
 
+func logMinecraftPreparationFailure(ctx context.Context, stage, nodeID, requestID string, server *auth.GameServer, retry bool, err error) {
+	operation, filename := "", ""
+	var failure *minecraftMinigameFileError
+	if errors.As(err, &failure) {
+		operation, filename = failure.operation, failure.file
+		err = failure.cause
+	}
+	log.Printf("minecraft instance preparation_failure stage=%s node=%q request=%q server=%q stack=%q retry=%t operation=%q file=%q error_class=%s error_type=%T context_error=%v", stage, nodeID, requestID, server.ID, server.StackName, retry, operation, filename, minecraftInstanceErrorClass(err), err, ctx.Err())
+}
+
 func (s *Server) reloadMinecraftInstanceProxy(ctx context.Context, worker pluginWorker, nodeID string, server *auth.GameServer) error {
 	metadata := parseGameServerMetadata(server.Metadata)
 	parent, err := s.Users.FindGameServerByRefForNode(ctx, nodeID, metadata.ParentServerID)
@@ -431,13 +444,16 @@ func (s *Server) syncMinecraftProxy(ctx context.Context, worker pluginWorker, no
 	}
 	manifest, err := buildMinecraftProxyManifest(ctx, worker, parent, resources, instances, servers, excludeID)
 	if err != nil {
+		logMinecraftPreparationFailure(ctx, "proxy_manifest", nodeID, "", parent, false, err)
 		return err
 	}
 	dataDirectory, err := s.velocityPluginDataDirectory(ctx, worker.baseURL, worker.apiKey, parent.RootPath)
 	if err != nil {
+		logMinecraftPreparationFailure(ctx, "proxy_data_directory", nodeID, "", parent, false, err)
 		return err
 	}
 	if err = s.workerWriteFile(ctx, worker.baseURL, worker.apiKey, path.Join(dataDirectory, "vestri-dynamic-servers.json"), string(manifest)); err != nil {
+		logMinecraftPreparationFailure(ctx, "proxy_manifest_write", nodeID, "", parent, false, &minecraftMinigameFileError{"write", "vestri-dynamic-servers.json", err})
 		return err
 	}
 	return reloadMinecraftProxyWorker(ctx, worker, nodeID, parent)

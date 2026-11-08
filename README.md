@@ -21,6 +21,7 @@ Example template spec (use existing base/proxy resource IDs):
   "maxInstances": 3,
   "mode": "minigames",
   "minigame": {
+    "lobbyMode": "vestri",
     "teams": ["red", "blue"],
     "teamSize": 2,
     "minPlayers": 2,
@@ -45,11 +46,24 @@ Example template spec (use existing base/proxy resource IDs):
 }
 ```
 
-- `teams`: 1-100 unique, case-sensitive identifiers matching
+- `lobbyMode`: optional string, defaults to `vestri`; only `vestri` and
+  `plugin` are accepted. `vestri` uses Vestri's minimum-player wait and
+  `onAllJoined` startup actions. `plugin` delegates the lobby/start decision to
+  the game plugin: Vestri does not wait for `minPlayers` or execute `onAllJoined`.
+  Nonempty `onAllJoined` is therefore rejected in plugin mode, not silently
+  ignored; send `[]` (the frontend default). Readiness and ending still apply.
+- `teams`: optional, omitted/null/`[]` all normalize to `[]` for free-for-all
+  games. Nonempty arrays contain at most 100 unique, case-sensitive identifiers matching
   `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. `returnPlayersTo` uses the same identifier
   rule. The backend does not check Minecraft team or fallback-server existence.
-- `teamSize`, `minPlayers`, and `maxPlayers`: integers 1-100, with
-  `minPlayers <= maxPlayers <= len(teams) * teamSize`.
+- `minPlayers` and `maxPlayers`: integers 1-100, with `minPlayers <= maxPlayers`
+  in both lobby modes. Plugin-lobby callers can send `minPlayers: 1`, but the
+  backend does not relax player-limit validation.
+- `teamSize`: integers 1-100 when teams are nonempty; then
+  `maxPlayers <= len(teams) * teamSize` is also required. Without teams, omitted
+  or zero is allowed, positive defaults up to 100 are ignored for capacity, and
+  negative or greater-than-100 values are rejected. Native lobbies may still
+  declare teams; identifier, size, and capacity validation is unchanged.
 - `readyServers`: integer 0 through template `maxInstances` (itself 1-100);
   omitted means 0. `joinTimeout` defaults to `20s`; `emptyGrace` defaults to
   `10s`. Both use Go duration strings and must be between `1s` and `10m`
@@ -64,6 +78,9 @@ Example template spec (use existing base/proxy resource IDs):
   Only `{team}`, `{player}`, `{uuid}`, and `{matchId}` placeholders are accepted;
   unmatched braces are rejected. `{team}` requires team or player repetition;
   `{player}` and `{uuid}` require player repetition; `{matchId}` works anywhere.
+  Without teams, both `forEach: "team"` (even without a placeholder) and
+  `{team}` are rejected. Once-only commands and per-player `{player}`/`{uuid}`
+  actions remain valid for team-free Vestri lobbies.
 - `end.logPattern` is optional, at most 512 bytes, and has no CR/LF. It must
   compile with Go's regexp engine; named groups, lookarounds/backreferences,
   ungreedy flags, POSIX classes, octal escapes without leading zero, and
@@ -74,6 +91,30 @@ Example template spec (use existing base/proxy resource IDs):
   explicitly be `true`. The backend validates and transports lifecycle rules;
   executing commands, readiness, transfers, end detection, and deletion remains
   the plugin's responsibility.
+
+A native plugin-lobby FFA minigame block can use:
+
+```json
+{
+  "lobbyMode": "plugin",
+  "teams": [],
+  "minPlayers": 1,
+  "maxPlayers": 20,
+  "readyServers": 1,
+  "lifecycle": {
+    "ready": { "trigger": "serverLoad" },
+    "onAllJoined": [],
+    "end": {
+      "whenEmpty": true,
+      "deleteServer": true
+    }
+  }
+}
+```
+
+Use `explicit` readiness instead when the game plugin must finish initialization
+before accepting players. `plugin` mode does not remove the readiness signal,
+join timeout, maximum-player limit, ready pool, or configured end lifecycle.
 
 Before instance startup, the backend writes
 `<instance root>/data/plugins/VestriConsoleBridge/minigame.json` containing
@@ -117,6 +158,9 @@ Each private `servers[slug].spec` has the same flattened shape as
 extra `minigame` wrapper, hash, or version. Its minigame fields come from the saved
 spawn-time instance `config.Spec`; only `maxInstances` uses the current template
 cap. The top-level template entry continues to contain the current template spec.
+Both shapes serialize normalized `lobbyMode` and `teams: []`; old templates and
+saved instance configs without `lobbyMode` normalize to `vestri`. Retry does not
+change a saved instance's lobby mode or teams to match an edited template.
 The proxy can persist `target.spec` in its per-instance ledger and compare raw
 specs to drain mismatched ready instances, while active instances retain their
 original lifecycle. Ordinary server entries omit `spec`. This is a transport
@@ -147,10 +191,60 @@ behavior. Credentials appear only in worker-side instance/proxy files, not
 template metadata or instance API responses; authorized file administrators can
 still read them. Protect worker access and do not publish these files.
 
+### Preparation Diagnostics And Deployment
+
+Deploy the backend contract first, then compatible Vestri JARs on both Velocity
+and Paper/Purpur before enabling team-free or plugin-lobby templates. The backend
+only validates/transports these fields; an older JAR cannot implement the native
+lobby behavior. No database migration or worker code change is required for this
+contract. Resynchronize the proxy after deployment or template changes using the
+protected sync endpoint above.
+
+`VESTRI_DYNAMIC_SYNC_OK` is not a successful spawn response. Fresh spawn first
+writes the proxy manifest and reloads Velocity as a preflight, then copies the
+template, writes the minigame config/properties/compose, installs the bridge,
+registers forwarding, commits the instance, starts it, and synchronizes again.
+A success marker can therefore precede a later preparation/API failure. Proxy
+sync schedules minigame network provisioning asynchronously, so its reentrant
+discovery does not synchronously wait on the spawning HTTP request.
+
+For a `Minigame preparation pending` IOException, correlate the caller UUID with
+the backend POST response and these backend/worker logs:
+
+- `minecraft instance preparation_failure`: `stage=proxy_preflight` or
+  `minigame_config`, node/request/stack/retry, and safe operation/file context.
+- Manifest sync failures identify `proxy_manifest`, `proxy_data_directory`, or
+  `proxy_manifest_write`; worker reload failures include `worker_status`.
+- Forwarding failures identify the read/write operation and relative config file
+  with `forwarding_failure`. Post-commit start/reload failures use
+  `post_commit_failure` and return `serverId` with HTTP 502.
+- The worker `/fs/write` handler creates parents with `MkdirAll`; its path check
+  permits nonexistent descendants. A missing parent alone does not cause failure
+  in the current worker. Inspect the worker's matching write/path error for an
+  actual filesystem failure instead of manually precreating plugin folders.
+
+Backend preparation logs deliberately omit credentials and worker response bodies.
+The public response already contains `name`, `serverId`, `slug`, `host`, `port`,
+`parentId`, and `state`. Friendly names follow the client's accepted identifier
+plus positive numeric suffix, including FFA names. The private control URL uses
+the parent slug's Docker service alias, not the filesystem root path.
+
+Retry POST with the **same raw request UUID and template-scoped key** after
+HTTP 502/503/504. Before database commit, cleanup removes the failed fresh instance;
+after commit, the saved request reuses the same instance, token, spec, correlation,
+and execution fence. Request lookup `GET /api/minecraft/v1/instances/requests/{UUID}`
+returns that key's instance or `{"instance":null}` without spawning. Missing or
+invalid saved configs fail closed, not by generating replacement credentials.
+A generic IOException and sync marker alone do not identify the failing stage;
+capture the actual API error and correlated deployment logs before assigning a
+runtime root cause.
+
 Focused regressions: `go test ./internal/server -run TestMinecraftMinigame -count=1`.
 They cover validation/defaults, worker provisioning/retry/cleanup/failures,
 exact request-ID and name transport, duration normalization, parent-scoped
-manifests, the protected manual sync route, and token-free public instance responses.
+manifests, optional teams, native lobby rejection of startup actions, pinned
+lobby serialization, secret-safe preparation diagnostics, the protected manual
+sync route, and token-free public instance responses.
 Set `VESTRI_VELOCITY_TEST_DATABASE_URL` to a disposable PostgreSQL URL to also run
 the isolated-schema discovery regression: brand-new templates with zero instances,
 deleted template removal, cancellation-independent post-commit sync, and retained
