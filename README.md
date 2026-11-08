@@ -178,8 +178,8 @@ tracked entries and staged plugins are preserved, and the entry is registered
 only once per node.
 
 Use the tracked plugin's **Update** button to download a newer release into
-staging and deploy it to the selected Velocity proxy and its accessible linked
-Paper/Purpur servers **only where that plugin is already installed**, using the
+staging and deploy it to explicitly selected servers from the Velocity proxy and
+its accessible linked Paper/Purpur servers **only where that plugin is already installed**, using the
 existing plugin manager's permissions and compatibility scope. Installation is
 identified by an exact tracked JAR filename (the installed filename or its saved
 filename history) in each server's `data/plugins` directory. Missing plugins,
@@ -192,6 +192,40 @@ identity includes the asset's SHA256 digest, so replacing the asset under the
 mutable `latest` tag is detected even when its filename does not change. Normal
 tracked checks retain the existing six-hour interval. There is no background
 automatic deployment of new releases.
+
+Tracked-plugin list responses include `servers: [{id, name, platform, version}]`
+and `templates: [{id, name, platform, version}]` alongside `plugins`. Server
+choices are only the current Velocity proxy and its accessible linked Paper/Purpur
+children with file-management permission, not arbitrary servers on the node.
+Platforms are `VELOCITY` or `PAPER` (including Purpur). Each plugin's `targetRefs`
+identifies the targets compatible with its resolved latest release.
+Template choices are node-wide Paper/Purpur templates, with platform
+`PAPER` and software/version resolved from their base when `baseId` is present.
+They are response-only metadata, not persisted in the tracking manifest.
+The plugin update POST accepts `{ "id": "<tracked plugin ID>", "serverIds":
+["<server ID>"], "templateIds": ["<template UUID>"] }`. Both selections are opt-in:
+omitted or empty `serverIds` deploys to no servers, and omitted or empty
+`templateIds` deploys to no templates. Staging still updates with neither selected.
+Nonempty selections are accepted only for updates, with at most 101 distinct
+server IDs and 100 distinct template IDs. Server IDs must exactly match the
+accessible candidates; template IDs must resolve to compatible templates on the
+same node. Empty, duplicate, unknown, or out-of-scope IDs are rejected. The
+resolved release must support every selected server and template; incompatible
+selections fail with an explicit error before downloads or writes. Release
+resolution retains all accessible server compatibility targets, regardless of
+deployment selection, and adds selected templates. Only selected targets are
+inspected for existing installations; unselected server directories are not listed.
+
+Template selection is a node-library owner/admin operation and is deliberately
+not restricted by the template's `parentId`: templates belonging to other proxies
+on the same node may be selected. Selected templates use the same exact tracked
+filename preflight as servers, under
+`.vestri-minecraft/<node ID>/templates/<template ID>/data/plugins`. Missing JARs
+are not installed; listing failures abort the entire update before writes.
+Unselected templates, bases, worlds, and plugin packs are unchanged. Updating a
+template affects future instances copied from it; existing instance files are
+updated only when explicitly selected from the accessible linked-server scope. Imports retain
+their staging-only behavior.
 
 An installed stable server JAR is left in place on subsequent starts. Existing
 untracked installations are copied to staging and adopted on their next

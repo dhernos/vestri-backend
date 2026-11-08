@@ -109,3 +109,95 @@ func TestPluginUpdateInspectionFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestPluginUpdateSelectedServersAndTemplates(t *testing.T) {
+	const templateID = "11111111-1111-4111-8111-111111111111"
+	resource := auth.MinecraftResource{ID: templateID, NodeID: "node", Kind: "templates", Spec: json.RawMessage(`{"software":"PAPER","version":"1.21.1"}`)}
+	_, templates, _, err := pluginTemplateTargets("node", []auth.MinecraftResource{resource}, []string{templateID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []auth.GameServer{{ID: "proxy", RootPath: "proxy"}, {ID: "paper", RootPath: "paper"}, {ID: "unselected", RootPath: "unselected"}}
+	for _, present := range []bool{true, false} {
+		for _, ids := range [][]string{nil, {}, {"paper"}, {"proxy", "paper"}} {
+			_, servers, err := pluginServerTargets("update", candidates, ids)
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets := append(servers, templates...)
+			var lists, copies, deletes []string
+			workerServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.Method == http.MethodGet && request.URL.Path == "/fs/list" {
+					lists = append(lists, request.URL.Query().Get("path"))
+					if present {
+						_, _ = response.Write([]byte(`[{"name":"Example-1.jar","type":"file"}]`))
+					} else {
+						_, _ = response.Write([]byte(`[]`))
+					}
+					return
+				}
+				if len(lists) != len(targets) {
+					t.Error("write before all selected targets were inspected")
+				}
+				var payload map[string]string
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Error(err)
+				}
+				switch request.URL.Path {
+				case "/fs/copy":
+					copies = append(copies, payload["dest"])
+				case "/fs/delete":
+					deletes = append(deletes, payload["path"])
+				default:
+					t.Errorf("unexpected worker request: %s", request.URL)
+				}
+			}))
+			baseURL, _ := url.Parse(workerServer.URL)
+			worker := pluginWorker{server: &Server{}, baseURL: baseURL}
+			plugin := trackedPlugin{Installed: pluginRelease{Filename: "Example-1.jar"}, Filenames: []string{"Example-1.jar"}}
+			installed, err := worker.installedTargets(context.Background(), pluginTargetsForRefs(targets, []string{"proxy", "paper", "unselected", "template:" + templateID}), plugin)
+			if err != nil {
+				workerServer.Close()
+				t.Fatal(err)
+			}
+			var wantLists, wantCopies, wantDeletes []string
+			for _, target := range targets {
+				directory := path.Join(target.RootPath, backendPluginsRelativePath)
+				wantLists = append(wantLists, directory)
+				if present {
+					wantCopies = append(wantCopies, path.Join(directory, "Example-2.jar"))
+					wantDeletes = append(wantDeletes, path.Join(directory, "Example-1.jar"))
+				}
+			}
+			for _, target := range installed {
+				if err := worker.replace(context.Background(), "download.jar", path.Join(target.RootPath, backendPluginsRelativePath), "Example-2.jar", plugin.Filenames); err != nil {
+					t.Fatal(err)
+				}
+			}
+			workerServer.Close()
+			if !reflect.DeepEqual(lists, wantLists) || !reflect.DeepEqual(copies, wantCopies) || !reflect.DeepEqual(deletes, wantDeletes) {
+				t.Fatalf("present=%v ids=%v: lists=%v copies=%v deletes=%v; want %v %v %v", present, ids, lists, copies, deletes, wantLists, wantCopies, wantDeletes)
+			}
+		}
+	}
+}
+
+func TestPluginUpdateStagingOnlySkipsServerInspection(t *testing.T) {
+	workerServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		t.Errorf("staging-only preflight contacted worker: %s %s", request.Method, request.URL)
+		response.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer workerServer.Close()
+	baseURL, _ := url.Parse(workerServer.URL)
+	worker := pluginWorker{server: &Server{}, baseURL: baseURL}
+	for _, ids := range [][]string{nil, {}} {
+		_, selected, err := pluginServerTargets("update", []auth.GameServer{{ID: "proxy"}, {ID: "paper"}}, ids)
+		if err != nil {
+			t.Fatal(err)
+		}
+		installed, err := worker.installedTargets(context.Background(), pluginTargetsForRefs(selected, []string{"proxy", "paper"}), trackedPlugin{Installed: pluginRelease{Filename: "Example.jar"}})
+		if err != nil || len(installed) != 0 {
+			t.Fatalf("staging-only preflight: installed=%v error=%v", installed, err)
+		}
+	}
+}

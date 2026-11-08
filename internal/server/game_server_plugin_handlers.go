@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"yourapp/internal/auth"
 )
 
@@ -42,6 +43,145 @@ type trackedPlugin struct {
 
 type pluginManifest struct {
 	Plugins []trackedPlugin `json:"plugins"`
+}
+
+type pluginTemplateChoice struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Platform string `json:"platform"`
+	Version  string `json:"version"`
+}
+
+type pluginServerChoice struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Platform string `json:"platform"`
+	Version  string `json:"version"`
+}
+
+func pluginServerTargets(operation string, candidates []auth.GameServer, ids []string) ([]pluginServerChoice, []auth.GameServer, error) {
+	if len(ids) > 0 && operation != "update" {
+		return nil, nil, fmt.Errorf("serverIds is only supported for plugin updates")
+	}
+	if len(ids) > maxGroupApplyServers+1 {
+		return nil, nil, fmt.Errorf("too many selected servers (maximum %d)", maxGroupApplyServers+1)
+	}
+	choices := make([]pluginServerChoice, 0, len(candidates))
+	available := make(map[string]auth.GameServer, len(candidates))
+	for _, candidate := range candidates {
+		metadata := parseGameServerMetadata(candidate.Metadata)
+		platform := strings.ToUpper(strings.TrimSpace(metadata.SoftwareVersion))
+		if isVelocityServer(&candidate) {
+			platform = "VELOCITY"
+		} else if platform == "PURPUR" {
+			platform = "PAPER"
+		}
+		choices = append(choices, pluginServerChoice{ID: candidate.ID, Name: candidate.Name, Platform: platform, Version: strings.TrimSpace(metadata.GameVersion)})
+		available[candidate.ID] = candidate
+	}
+	sort.Slice(choices, func(left, right int) bool { return choices[left].ID < choices[right].ID })
+	selected := make([]auth.GameServer, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			return nil, nil, fmt.Errorf("invalid or duplicate server ID")
+		}
+		candidate, ok := available[id]
+		if !ok {
+			return nil, nil, fmt.Errorf("selected server %s is not an accessible Velocity or linked Paper/Purpur server", id)
+		}
+		seen[id] = true
+		selected = append(selected, candidate)
+	}
+	return choices, selected, nil
+}
+
+func requirePluginServerCompatibility(targets []auth.GameServer, refs []string) error {
+	for _, target := range targets {
+		if !containsPluginFilename(refs, target.ID) {
+			return fmt.Errorf("selected server %s is incompatible with the resolved plugin release", target.ID)
+		}
+	}
+	return nil
+}
+
+func validatePluginTemplateSelection(operation string, ids []string) error {
+	if len(ids) > 0 && operation != "update" {
+		return fmt.Errorf("templateIds is only supported for plugin updates")
+	}
+	if len(ids) > maxGroupApplyServers {
+		return fmt.Errorf("too many selected templates (maximum %d)", maxGroupApplyServers)
+	}
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if _, err := uuid.Parse(id); err != nil || seen[id] {
+			return fmt.Errorf("invalid or duplicate template ID")
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+func pluginTemplateTargets(nodeID string, resources []auth.MinecraftResource, ids []string) ([]pluginTemplateChoice, []auth.GameServer, []pluginCompatibilityTarget, error) {
+	if err := validatePluginTemplateSelection("update", ids); err != nil {
+		return nil, nil, nil, err
+	}
+	choices := make([]pluginTemplateChoice, 0)
+	available := make(map[string]auth.MinecraftResource)
+	versions := make(map[string]minecraftResourceSpec)
+	for _, resource := range resources {
+		if resource.NodeID != nodeID || resource.Kind != "templates" {
+			continue
+		}
+		if _, err := uuid.Parse(resource.ID); err != nil {
+			continue
+		}
+		var spec minecraftResourceSpec
+		if json.Unmarshal(resource.Spec, &spec) != nil {
+			continue
+		}
+		if spec.BaseID != "" {
+			found := false
+			for _, base := range resources {
+				if base.ID == spec.BaseID && base.NodeID == nodeID && base.Kind == "bases" {
+					spec = minecraftResourceSpec{}
+					found = json.Unmarshal(base.Spec, &spec) == nil
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		software := strings.ToUpper(strings.TrimSpace(spec.Software))
+		if (software != "PAPER" && software != "PURPUR") || !stableMinecraftVersionPattern.MatchString(spec.Version) {
+			continue
+		}
+		available[resource.ID], versions[resource.ID] = resource, spec
+		choices = append(choices, pluginTemplateChoice{ID: resource.ID, Name: resource.Name, Platform: "PAPER", Version: spec.Version})
+	}
+	sort.Slice(choices, func(left, right int) bool { return choices[left].ID < choices[right].ID })
+	targets := make([]auth.GameServer, 0, len(ids))
+	compatibility := make([]pluginCompatibilityTarget, 0, len(ids))
+	for _, id := range ids {
+		resource, ok := available[id]
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("selected template %s is not a compatible Paper/Purpur template on this node", id)
+		}
+		ref := "template:" + id
+		targets = append(targets, auth.GameServer{ID: ref, RootPath: minecraftResourcePath(&resource)})
+		compatibility = append(compatibility, pluginCompatibilityTarget{ServerRef: ref, Platform: "PAPER", Version: versions[id].Version})
+	}
+	return choices, targets, compatibility, nil
+}
+
+func requirePluginTemplateCompatibility(targets []pluginCompatibilityTarget, refs []string) error {
+	for _, target := range targets {
+		if !containsPluginFilename(refs, target.ServerRef) {
+			return fmt.Errorf("selected template %s is incompatible with the resolved plugin release", strings.TrimPrefix(target.ServerRef, "template:"))
+		}
+	}
+	return nil
 }
 
 type pluginWorker struct {
@@ -298,7 +438,18 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 	if operation == "list" {
-		_, compatibilityTargets, targetsErr := s.paperPluginTargets(ctx, sess.UserID, node, parent)
+		resources, err := s.Users.ListMinecraftResources(ctx, node.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to load Minecraft templates")
+			return
+		}
+		choices, _, _, err := pluginTemplateTargets(node.ID, resources, nil)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		serverTargets, compatibilityTargets, targetsErr := s.paperPluginTargets(ctx, sess.UserID, node, parent)
+		serverChoices, _, _ := pluginServerTargets("list", serverTargets, nil)
 		changed := false
 		for index := range manifest.Plugins {
 			plugin := &manifest.Plugins[index]
@@ -338,16 +489,32 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, manifest)
+		writeJSON(w, http.StatusOK, struct {
+			pluginManifest
+			Templates []pluginTemplateChoice `json:"templates"`
+			Servers   []pluginServerChoice   `json:"servers"`
+		}{pluginManifest: manifest, Templates: choices, Servers: serverChoices})
 		return
 	}
 	var request struct {
-		URL string `json:"url"`
-		ID  string `json:"id"`
+		URL         string   `json:"url"`
+		ID          string   `json:"id"`
+		TemplateIDs []string `json:"templateIds"`
+		ServerIDs   []string `json:"serverIds"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
+	}
+	if err := validatePluginTemplateSelection(operation, request.TemplateIDs); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if operation != "update" {
+		if _, _, err := pluginServerTargets(operation, nil, request.ServerIDs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	if operation == "remove" {
 		found := false
@@ -373,6 +540,15 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	var selectedServers []auth.GameServer
+	if operation == "update" {
+		_, selectedServers, err = pluginServerTargets(operation, targets, request.ServerIDs)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		targets = selectedServers
 	}
 	index := -1
 	var plugin trackedPlugin
@@ -409,6 +585,25 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 			return
 		}
 	}
+	var templateCompatibility []pluginCompatibilityTarget
+	if operation == "update" && len(request.TemplateIDs) > 0 {
+		resources, err := s.Users.ListMinecraftResources(ctx, node.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to load Minecraft templates; no files were changed")
+			return
+		}
+		_, templateTargets, selectedCompatibility, err := pluginTemplateTargets(node.ID, resources, request.TemplateIDs)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		targets = append(targets, templateTargets...)
+		templateCompatibility = selectedCompatibility
+		compatibilityTargets = append(compatibilityTargets, templateCompatibility...)
+		sort.Slice(compatibilityTargets, func(left, right int) bool {
+			return compatibilityTargets[left].ServerRef < compatibilityTargets[right].ServerRef
+		})
+	}
 	release, targetRefs, err := latestPluginRelease(ctx, plugin.Source, compatibilityTargets)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -416,6 +611,14 @@ func (s *Server) handlePluginOperation(w http.ResponseWriter, r *http.Request, o
 	}
 	var deploymentTargets []auth.GameServer
 	if operation == "update" {
+		if err := requirePluginServerCompatibility(selectedServers, targetRefs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := requirePluginTemplateCompatibility(templateCompatibility, targetRefs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		deploymentTargets, err = worker.installedTargets(ctx, pluginTargetsForRefs(targets, targetRefs), plugin)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "Failed to inspect installed plugins; no files were changed: "+err.Error())
