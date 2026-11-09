@@ -21,8 +21,8 @@ Example template spec (use existing base/proxy resource IDs):
   "maxInstances": 3,
   "mode": "minigames",
   "minigame": {
-	"enabled": true,
-	"teamPolicy": "balanced",
+    "enabled": true,
+    "teamPolicy": "balanced",
     "instanceMode": "temporary",
     "lobbyMode": "vestri",
     "teams": ["red", "blue"],
