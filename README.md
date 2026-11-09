@@ -97,6 +97,8 @@ Example template spec (use existing base/proxy resource IDs):
   the game plugin: Vestri does not wait for `minPlayers` or execute `onAllJoined`.
   Nonempty `onAllJoined`, `teamCommands`, or `startCommands` is therefore
   rejected in plugin mode, not silently ignored; send empty arrays.
+  `onPlayerJoin` actions are allowed in both lobby modes, including permanent
+  plugin-lobby instances; they are not startup actions.
   Readiness still applies; ending applies to temporary
   instances only.
 - `teams`: optional, omitted/null/`[]` all normalize to `[]` for free-for-all
@@ -127,20 +129,79 @@ Example template spec (use existing base/proxy resource IDs):
   an array of commands (omitted/null becomes `[]`). Each command is
   1-1024 bytes, nonblank, without a leading slash (including after whitespace)
   or control characters/newlines. `forEach` is empty/omitted, `team`, or `player`.
+  Commands optionally accept `sender: "server"` (the default) or
+  `sender: "player"`. Other values, including explicit null, empty strings, and
+  non-strings, are rejected. Default server senders are omitted on serialization.
   Only `{team}`, `{player}`, `{uuid}`, and `{matchId}` placeholders are accepted;
-  unmatched braces are rejected. `{team}` requires team or player repetition;
-  `{player}` and `{uuid}` require player repetition; `{matchId}` works anywhere.
+  unmatched braces are rejected. For server commands, `{team}` requires team or
+  player repetition; `{player}` and `{uuid}` require player repetition.
+  Player-sender commands have selected-player context even without repetition;
+  `{player}`, `{uuid}`, and `{team}` refer to that selected player.
+  `{matchId}` works anywhere.
   Without teams, both `forEach: "team"` (even without a placeholder) and
   `{team}` are rejected. Once-only commands and per-player `{player}`/`{uuid}`
   actions remain valid for team-free Vestri lobbies.
-- `lifecycle.teamCommands`: optional array of `{team, command}`. `team` is
+- `lifecycle.teamCommands`: optional array of `{team, command, sender?}`. `team` is
   required and must exactly match a declared team; `*` is not accepted. The
   command runs per player assigned to that team and accepts `{player}`, `{uuid}`,
   `{team}`, and `{matchId}` using the same validation as `forEach: "player"`.
-  `lifecycle.startCommands` is an optional string array of final once-only
-  commands; only `{matchId}` is accepted. `onAllJoined`, `teamCommands`, and
-  `startCommands` together are limited to 100 commands. Execution/order must be
-  implemented by compatible agents; the backend only transports the contract.
+- `lifecycle.startCommands`: optional array of final once-only commands. Each
+  entry is either a legacy string (server sender) or
+  `{"command":"...","sender":"player"}` with optional `sender` defaulting to
+  server. Legacy strings remain strings when saved, patched, resolved into
+  variants, or pinned to instance configs; object entries remain objects.
+  Server starts accept only `{matchId}`. Player starts accept `{player}`,
+  `{uuid}`, `{team}`, and `{matchId}` using one selected roster player.
+- `lifecycle.onPlayerJoin`: optional array of `{command, sender?}` actions for
+  each admitted player join, including later joins/rejoins on permanent servers.
+  `forEach` must be absent, even an empty or null value is rejected. Both senders
+  use the joining player's `{player}`, `{uuid}`, and optional `{team}` context,
+  not a random roster member; `{matchId}` is also accepted. `{team}` always
+  requires declared teams, including in inherited variant actions.
+  `onAllJoined`, `teamCommands`, `startCommands`, and `onPlayerJoin` together are
+  limited to 100 commands, with the same 1024-byte/placeholder/control-character
+  limits for every entry.
+
+Compatible agents must execute setup, team commands, and final starts in order.
+Setup `forEach: "player"` supports either sender for each assigned player.
+Setup `forEach: "team"` with a player sender selects an online member of that
+team, with `{player}`/`{uuid}` from that member. Once-only setup and start actions
+with a player sender select one random eligible online match-roster player per
+action, not every player. Team commands still run once per assigned player for
+either sender. Player commands run as the actual selected player with normal
+permissions: no OP elevation, sudo, or console fallback. No eligible online player
+means a player-sender action is skipped (NOOP). These are agent execution
+requirements; the backend validates, persists, and transports them and does not
+dispatch Minecraft commands. Deploy sender/join-capable agents before using the
+new fields. Existing broadcast and end behavior, including strict trusted-plugin
+logger matching, is unchanged.
+
+A managed lifecycle can mix legacy starts and sender-aware actions:
+
+```json
+{
+  "ready": { "trigger": "serverLoad" },
+  "onAllJoined": [
+    { "command": "team join {team} {player}", "forEach": "player" },
+    { "command": "arena select {team}", "forEach": "team", "sender": "player" }
+  ],
+  "teamCommands": [
+    { "team": "red", "command": "arena ready {player}", "sender": "player" }
+  ],
+  "startCommands": [
+    "say Match {matchId} ready",
+    { "command": "arena start", "sender": "player" }
+  ],
+  "onPlayerJoin": [
+    { "command": "tag {player} add participant" },
+    { "command": "arena join", "sender": "player" }
+  ],
+  "end": { "whenEmpty": true, "deleteServer": true }
+}
+```
+
+The end rules below are unchanged:
+
 - `end.logPattern` is optional, at most 512 bytes, and has no CR/LF. It must
   compile with Go's regexp engine; named groups, lookarounds/backreferences,
   ungreedy flags, POSIX classes, octal escapes without leading zero, and
@@ -208,6 +269,29 @@ agent reports and roster acknowledgements, not automatic player reconnection
 or restoration of the gameplay plugin's own state. Failures make an instance
 unavailable or release failed admissions rather than automatically deleting it;
 explicit authorized dashboard deletion remains available.
+
+For example, this permanent FFA minigame block admits join actions without
+enabling Vestri startup commands:
+
+```json
+{
+  "instanceMode": "permanent",
+  "lobbyMode": "plugin",
+  "teams": [],
+  "minPlayers": 1,
+  "maxPlayers": 20,
+  "readyServers": 1,
+  "lifecycle": {
+    "ready": { "trigger": "serverLoad" },
+    "onAllJoined": [],
+    "onPlayerJoin": [
+      { "command": "tag {player} add visitor" },
+      { "command": "arena join", "sender": "player" }
+    ],
+    "end": { "whenEmpty": false, "deleteServer": false }
+  }
+}
+```
 
 Before instance startup, the backend writes
 `<instance root>/data/plugins/VestriConsoleBridge/minigame.json` containing

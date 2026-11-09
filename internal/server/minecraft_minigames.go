@@ -45,17 +45,79 @@ type minecraftMinigameVariant struct {
 }
 
 type minecraftMinigameTeamCommand struct {
-	Team    string `json:"team"`
-	Command string `json:"command"`
+	Team    string                  `json:"team"`
+	Command string                  `json:"command"`
+	Sender  minecraftMinigameSender `json:"sender,omitempty"`
+}
+
+func (command minecraftMinigameTeamCommand) MarshalJSON() ([]byte, error) {
+	if err := normalizeMinecraftMinigameSender(&command.Sender); err != nil {
+		return nil, err
+	}
+	type object minecraftMinigameTeamCommand
+	return json.Marshal(object(command))
+}
+
+type minecraftMinigameSender string
+
+func (sender *minecraftMinigameSender) UnmarshalJSON(content []byte) error {
+	var value string
+	if err := json.Unmarshal(content, &value); err != nil || (value != "server" && value != "player") {
+		return fmt.Errorf("command sender must be server or player")
+	}
+	*sender = minecraftMinigameSender(value)
+	if value == "server" {
+		*sender = ""
+	}
+	return nil
+}
+
+type minecraftMinigameStartCommand struct {
+	Command string                  `json:"command"`
+	Sender  minecraftMinigameSender `json:"sender,omitempty"`
+	legacy  bool
+}
+
+func (command *minecraftMinigameStartCommand) UnmarshalJSON(content []byte) error {
+	var legacy string
+	if len(content) > 0 && content[0] == '"' {
+		if err := json.Unmarshal(content, &legacy); err != nil {
+			return err
+		}
+		*command = minecraftMinigameStartCommand{Command: legacy, legacy: true}
+		return nil
+	}
+	type object minecraftMinigameStartCommand
+	var decoded object
+	if len(content) == 0 || content[0] != '{' {
+		return fmt.Errorf("start command must be a string or command object")
+	}
+	if err := json.Unmarshal(content, &decoded); err != nil {
+		return err
+	}
+	*command = minecraftMinigameStartCommand(decoded)
+	return nil
+}
+
+func (command minecraftMinigameStartCommand) MarshalJSON() ([]byte, error) {
+	if err := normalizeMinecraftMinigameSender(&command.Sender); err != nil {
+		return nil, err
+	}
+	if command.legacy && (command.Sender == "" || command.Sender == "server") {
+		return json.Marshal(command.Command)
+	}
+	type object minecraftMinigameStartCommand
+	return json.Marshal(object(command))
 }
 
 type minecraftMinigameLifecycle struct {
 	Ready struct {
 		Trigger string `json:"trigger"`
 	} `json:"ready"`
-	OnAllJoined   []minecraftMinigameCommand     `json:"onAllJoined"`
-	TeamCommands  []minecraftMinigameTeamCommand `json:"teamCommands,omitempty"`
-	StartCommands []string                       `json:"startCommands,omitempty"`
+	OnAllJoined   []minecraftMinigameCommand      `json:"onAllJoined"`
+	TeamCommands  []minecraftMinigameTeamCommand  `json:"teamCommands,omitempty"`
+	StartCommands []minecraftMinigameStartCommand `json:"startCommands,omitempty"`
+	OnPlayerJoin  []minecraftMinigameCommand      `json:"onPlayerJoin,omitempty"`
 	End           struct {
 		LogPattern      string `json:"logPattern,omitempty"`
 		LoggerName      string `json:"loggerName,omitempty"`
@@ -67,8 +129,37 @@ type minecraftMinigameLifecycle struct {
 }
 
 type minecraftMinigameCommand struct {
-	Command string `json:"command"`
-	ForEach string `json:"forEach"`
+	Command        string                  `json:"command"`
+	ForEach        string                  `json:"forEach,omitempty"`
+	Sender         minecraftMinigameSender `json:"sender,omitempty"`
+	forEachPresent bool
+}
+
+func (command *minecraftMinigameCommand) UnmarshalJSON(content []byte) error {
+	type object minecraftMinigameCommand
+	var decoded object
+	if err := json.Unmarshal(content, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(content, &fields); err != nil {
+		return err
+	}
+	*command = minecraftMinigameCommand(decoded)
+	for field := range fields {
+		if strings.EqualFold(field, "forEach") {
+			command.forEachPresent = true
+		}
+	}
+	return nil
+}
+
+func (command minecraftMinigameCommand) MarshalJSON() ([]byte, error) {
+	if err := normalizeMinecraftMinigameSender(&command.Sender); err != nil {
+		return nil, err
+	}
+	type object minecraftMinigameCommand
+	return json.Marshal(object(command))
 }
 
 var minecraftMinigameIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
@@ -170,33 +261,63 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 	if lifecycle.Ready.Trigger != "serverLoad" && lifecycle.Ready.Trigger != "explicit" {
 		return fmt.Errorf("ready.trigger must be serverLoad or explicit")
 	}
-	if len(lifecycle.OnAllJoined)+len(lifecycle.TeamCommands)+len(lifecycle.StartCommands) > 100 {
+	if len(lifecycle.OnAllJoined)+len(lifecycle.TeamCommands)+len(lifecycle.StartCommands)+len(lifecycle.OnPlayerJoin) > 100 {
 		return fmt.Errorf("lifecycle is limited to 100 commands combined")
 	}
 	if game.LobbyMode == "plugin" && len(lifecycle.OnAllJoined)+len(lifecycle.TeamCommands)+len(lifecycle.StartCommands) > 0 {
 		return fmt.Errorf("lifecycle commands must be empty in plugin lobby mode")
 	}
-	for _, command := range lifecycle.TeamCommands {
+	for index := range lifecycle.TeamCommands {
+		command := &lifecycle.TeamCommands[index]
+		if err := normalizeMinecraftMinigameSender(&command.Sender); err != nil {
+			return err
+		}
 		if !seen[command.Team] {
 			return fmt.Errorf("teamCommands team must name an existing team")
 		}
-		if err := validateMinecraftMinigameCommand(minecraftMinigameCommand{Command: command.Command, ForEach: "player"}); err != nil {
+		if err := validateMinecraftMinigameCommand(minecraftMinigameCommand{Command: command.Command, ForEach: "player", Sender: command.Sender}); err != nil {
 			return err
 		}
 	}
-	for _, command := range lifecycle.StartCommands {
-		if err := validateMinecraftMinigameCommand(minecraftMinigameCommand{Command: command}); err != nil {
+	for index := range lifecycle.StartCommands {
+		command := &lifecycle.StartCommands[index]
+		if err := normalizeMinecraftMinigameSender(&command.Sender); err != nil {
+			return err
+		}
+		if len(game.Teams) == 0 && strings.Contains(command.Command, "{team}") {
+			return fmt.Errorf("{team} requires nonempty teams")
+		}
+		if err := validateMinecraftMinigameCommand(minecraftMinigameCommand{Command: command.Command, Sender: command.Sender}); err != nil {
 			return err
 		}
 	}
 	if lifecycle.OnAllJoined == nil {
 		lifecycle.OnAllJoined = []minecraftMinigameCommand{}
 	}
-	for _, command := range lifecycle.OnAllJoined {
+	for index := range lifecycle.OnAllJoined {
+		command := &lifecycle.OnAllJoined[index]
+		if err := normalizeMinecraftMinigameSender(&command.Sender); err != nil {
+			return err
+		}
 		if len(game.Teams) == 0 && (command.ForEach == "team" || strings.Contains(command.Command, "{team}")) {
 			return fmt.Errorf("team repetition and {team} require nonempty teams")
 		}
-		if err := validateMinecraftMinigameCommand(command); err != nil {
+		if err := validateMinecraftMinigameCommand(*command); err != nil {
+			return err
+		}
+	}
+	for index := range lifecycle.OnPlayerJoin {
+		command := &lifecycle.OnPlayerJoin[index]
+		if err := normalizeMinecraftMinigameSender(&command.Sender); err != nil {
+			return err
+		}
+		if command.ForEach != "" || command.forEachPresent {
+			return fmt.Errorf("onPlayerJoin does not accept forEach")
+		}
+		if len(game.Teams) == 0 && strings.Contains(command.Command, "{team}") {
+			return fmt.Errorf("{team} requires nonempty teams")
+		}
+		if err := validateMinecraftMinigameCommand(minecraftMinigameCommand{Command: command.Command, Sender: command.Sender, ForEach: "player"}); err != nil {
 			return err
 		}
 	}
@@ -322,7 +443,20 @@ func minecraftMinigameInstanceProperties(properties string, spec *minecraftResou
 	return properties
 }
 
+func normalizeMinecraftMinigameSender(sender *minecraftMinigameSender) error {
+	if *sender != "" && *sender != "server" && *sender != "player" {
+		return fmt.Errorf("command sender must be server or player")
+	}
+	if *sender == "server" {
+		*sender = ""
+	}
+	return nil
+}
+
 func validateMinecraftMinigameCommand(command minecraftMinigameCommand) error {
+	if err := normalizeMinecraftMinigameSender(&command.Sender); err != nil {
+		return err
+	}
 	text := strings.TrimSpace(command.Command)
 	if text == "" || len(command.Command) > 1024 || strings.HasPrefix(text, "/") || strings.IndexFunc(command.Command, unicode.IsControl) >= 0 {
 		return fmt.Errorf("commands must be 1-1024 bytes, without slash prefix or control characters")
@@ -334,11 +468,11 @@ func validateMinecraftMinigameCommand(command minecraftMinigameCommand) error {
 		switch placeholder[1] {
 		case "matchId":
 		case "team":
-			if command.ForEach == "" {
+			if command.ForEach == "" && command.Sender != "player" {
 				return fmt.Errorf("{team} requires team or player repetition")
 			}
 		case "player", "uuid":
-			if command.ForEach != "player" {
+			if command.ForEach != "player" && command.Sender != "player" {
 				return fmt.Errorf("{player} and {uuid} require player repetition")
 			}
 		default:

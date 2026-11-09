@@ -131,12 +131,18 @@ func TestMinecraftMinigameRoleAndLifecycleContract(t *testing.T) {
 		{"team command invalid", func(game *minecraftMinigameSpec) {
 			game.Lifecycle.TeamCommands = []minecraftMinigameTeamCommand{{Team: "red", Command: "/say hi"}}
 		}, false},
-		{"start", func(game *minecraftMinigameSpec) { game.Lifecycle.StartCommands = []string{"start {matchId}"} }, true},
-		{"start player", func(game *minecraftMinigameSpec) { game.Lifecycle.StartCommands = []string{"start {player}"} }, false},
-		{"start team", func(game *minecraftMinigameSpec) { game.Lifecycle.StartCommands = []string{"start {team}"} }, false},
+		{"start", func(game *minecraftMinigameSpec) {
+			game.Lifecycle.StartCommands = []minecraftMinigameStartCommand{{Command: "start {matchId}"}}
+		}, true},
+		{"start player", func(game *minecraftMinigameSpec) {
+			game.Lifecycle.StartCommands = []minecraftMinigameStartCommand{{Command: "start {player}"}}
+		}, false},
+		{"start team", func(game *minecraftMinigameSpec) {
+			game.Lifecycle.StartCommands = []minecraftMinigameStartCommand{{Command: "start {team}"}}
+		}, false},
 		{"combined cap", func(game *minecraftMinigameSpec) {
 			for index := 0; index < 100; index++ {
-				game.Lifecycle.StartCommands = append(game.Lifecycle.StartCommands, "say hi")
+				game.Lifecycle.StartCommands = append(game.Lifecycle.StartCommands, minecraftMinigameStartCommand{Command: "say hi"})
 			}
 		}, false},
 		{"plugin team command", func(game *minecraftMinigameSpec) {
@@ -147,7 +153,7 @@ func TestMinecraftMinigameRoleAndLifecycleContract(t *testing.T) {
 		{"plugin start command", func(game *minecraftMinigameSpec) {
 			game.LobbyMode = "plugin"
 			game.Lifecycle.OnAllJoined = nil
-			game.Lifecycle.StartCommands = []string{"start"}
+			game.Lifecycle.StartCommands = []minecraftMinigameStartCommand{{Command: "start"}}
 		}, false},
 		{"logger", func(game *minecraftMinigameSpec) { game.Lifecycle.End.LoggerName = "my.Plugin_logger-1" }, true},
 		{"colon logger", func(game *minecraftMinigameSpec) { game.Lifecycle.End.LoggerName = "my:Plugin_logger-1" }, true},
@@ -302,7 +308,7 @@ func TestMinecraftMinigameVariantPinnedConfig(t *testing.T) {
 	if err := provisionMinecraftMinigame(ctx, worker, instance, parent, &spec, false); err != nil {
 		t.Fatal(err)
 	}
-	spec.Minigame.Lifecycle.StartCommands = []string{"changed"}
+	spec.Minigame.Lifecycle.StartCommands = []minecraftMinigameStartCommand{{Command: "changed"}}
 	if err := provisionMinecraftMinigame(ctx, worker, instance, parent, &spec, true); err != nil {
 		t.Fatal(err)
 	}

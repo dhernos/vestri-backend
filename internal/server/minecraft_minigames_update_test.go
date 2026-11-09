@@ -38,6 +38,9 @@ INSERT INTO "WorkerNodeGuest" ("id","nodeId","userId","permission") VALUES ('tem
 	spec.ParentID, spec.Software, spec.Version, spec.Jar = "proxy", "PAPER", "1.21.4", "server.jar"
 	maxPlayers := 2
 	spec.Minigame.Variants = map[string]minecraftMinigameVariant{"duel": {MaxPlayers: &maxPlayers}}
+	if err := json.Unmarshal([]byte(minecraftMinigameSenderLifecycleJSON), &spec.Minigame.Lifecycle); err != nil {
+		t.Fatal(err)
+	}
 	raw, _ := json.Marshal(spec)
 	resource := auth.MinecraftResource{ID: uuid.NewString(), NodeID: "node", Kind: "templates", Name: "Editable Game", Spec: raw}
 	if err := api.Users.CreateMinecraftResource(ctx, resource); err != nil {
@@ -170,7 +173,26 @@ INSERT INTO "WorkerNodeGuest" ("id","nodeId","userId","permission") VALUES ('tem
 	if mutations != 0 {
 		t.Fatal("rejected updates mutated worker")
 	}
+	for _, list := range []string{"onAllJoined", "teamCommands", "startCommands", "onPlayerJoin"} {
+		var invalid map[string]interface{}
+		content, _ := json.Marshal(spec.Minigame)
+		_ = json.Unmarshal(content, &invalid)
+		invalid["lifecycle"].(map[string]interface{})[list] = []interface{}{map[string]interface{}{"command": "say hi", "team": "red", "sender": nil}}
+		body, _ := json.Marshal(map[string]interface{}{"minigame": invalid})
+		assertCode(requestAs(ctx, "owner", http.MethodPatch, target, string(body)), http.StatusBadRequest)
+	}
 	assertCode(patch(ctx, "template-admin"), http.StatusOK)
+	savedResource, err := api.Users.FindMinecraftResource(ctx, "node", resource.ID)
+	if err != nil || savedResource == nil {
+		t.Fatal("missing saved PATCH", err)
+	}
+	for _, content := range []string{string(savedResource.Spec), files[resourceManifest]} {
+		var savedSpec minecraftResourceSpec
+		if err := json.Unmarshal([]byte(content), &savedSpec); err != nil {
+			t.Fatal(err)
+		}
+		assertMinecraftMinigameSenderLifecycle(t, savedSpec.Minigame.Lifecycle)
+	}
 	if copies != 0 || reloads != 1 {
 		t.Fatal("PATCH copied template files or missed sync")
 	}
@@ -183,6 +205,7 @@ INSERT INTO "WorkerNodeGuest" ("id","nodeId","userId","permission") VALUES ('tem
 	if published.Minigames[resource.Name].Enabled == nil || !*published.Minigames[resource.Name].Enabled || len(published.Minigames[resource.Name].Variants) != 1 {
 		t.Fatal("base and variants not published")
 	}
+	assertMinecraftMinigameSenderLifecycle(t, published.Minigames[resource.Name].Lifecycle)
 	for _, failure := range []string{"file", "reload", "canceled"} {
 		spec.Minigame.JoinTimeout = "21s"
 		failFile, failReload = failure == "file", failure == "reload"
@@ -257,13 +280,14 @@ CREATE TRIGGER reject_template_update BEFORE UPDATE ON "MinecraftResource" FOR E
 	if config.Variant != "duel" || config.Spec.MaxPlayers != 2 || config.Spec.Variants != nil || !strings.Contains(files[path.Join(duel.Slug, "data/server.properties")], "max-players=2\n") {
 		t.Fatal("variant not resolved before provisioning")
 	}
+	assertMinecraftMinigameSenderLifecycle(t, config.Spec.Lifecycle)
 	savedConfig := files[configPath]
 	before := mutations
 	assertCode(spawn(duelID, ""), http.StatusConflict)
 	if mutations != before {
 		t.Fatal("variant mismatch mutated worker")
 	}
-	spec.Minigame.Lifecycle.StartCommands = []string{"changed {matchId}"}
+	spec.Minigame.Lifecycle.StartCommands = []minecraftMinigameStartCommand{{Command: "changed {matchId}"}}
 	spec.Minigame.Variants = nil
 	assertCode(patch(ctx, "owner"), http.StatusOK)
 	assertCode(spawn(duelID, "duel"), http.StatusAccepted)
@@ -304,6 +328,7 @@ CREATE TRIGGER reject_template_update BEFORE UPDATE ON "MinecraftResource" FOR E
 	if manifest.Servers[duel.Slug].Variant != "duel" || manifest.Servers[duel.Slug].Spec.MaxPlayers != 2 || manifest.Servers[base.Slug].Variant != "" || manifest.Servers[base.Slug].Spec.MaxPlayers != 4 {
 		t.Fatal("target variants or snapshots not pinned")
 	}
+	assertMinecraftMinigameSenderLifecycle(t, manifest.Servers[duel.Slug].Spec.Lifecycle)
 	beforeCopies := copies
 	failReload = true
 	response = requestAs(ctx, "owner", http.MethodDelete, target, "")
