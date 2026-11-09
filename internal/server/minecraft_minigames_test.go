@@ -753,7 +753,7 @@ func TestMinecraftMinigameManifest(t *testing.T) {
 		}
 		if excluded == "" {
 			game := manifest.Servers["game-slug"]
-			if len(manifest.Servers) != 2 || len(game) != 9 || game["token"] != config.Token || game["serverId"] != "game-id" || game["id"] != "game-id" || game["requestId"] != instances[0].RequestID || game["template"] != "Team Game" || game["name"] != "TeamGame-1" || game["host"] != "game-host" || game["port"] != float64(25565) {
+			if len(manifest.Servers) != 2 || len(game) != 10 || game["variant"] != "" || game["token"] != config.Token || game["serverId"] != "game-id" || game["id"] != "game-id" || game["requestId"] != instances[0].RequestID || game["template"] != "Team Game" || game["name"] != "TeamGame-1" || game["host"] != "game-host" || game["port"] != float64(25565) {
 				t.Fatal("wrong minigame server manifest entry")
 			}
 			gotSpec, err := json.Marshal(game["spec"])
@@ -789,7 +789,7 @@ func TestMinecraftMinigameManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	game := correlatedManifest.Servers["game-slug"]
-	if len(game) != 10 || game["spawnRequestId"] != rawRequestID || game["requestId"] != instances[0].RequestID || game["token"] != config.Token {
+	if len(game) != 11 || game["variant"] != "" || game["spawnRequestId"] != rawRequestID || game["requestId"] != instances[0].RequestID || game["token"] != config.Token {
 		t.Fatal("manifest lost raw correlation, persisted request hash or saved token")
 	}
 	if _, present := correlatedManifest.Servers["ordinary-slug"]["spawnRequestId"]; present {

@@ -76,6 +76,17 @@ func (r *UserRepository) CreateMinecraftResource(ctx context.Context, resource M
 	return err
 }
 
+func (r *UserRepository) UpdateMinecraftResourceSpec(ctx context.Context, nodeID, id string, spec json.RawMessage) error {
+	result, err := r.DB.Exec(ctx, `UPDATE "MinecraftResource" SET "spec"=$3 WHERE "nodeId"=$1 AND "id"=$2 AND "kind"='templates'`, nodeID, id, spec)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
 func (r *UserRepository) DeleteMinecraftResource(ctx context.Context, nodeID, id string) error {
 	_, err := r.DB.Exec(ctx, `DELETE FROM "MinecraftResource" WHERE "nodeId"=$1 AND "id"=$2`, nodeID, id)
 	return err

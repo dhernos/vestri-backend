@@ -18,24 +18,47 @@ import (
 )
 
 type minecraftMinigameSpec struct {
-	InstanceMode string                     `json:"instanceMode,omitempty"`
-	LobbyMode    string                     `json:"lobbyMode,omitempty"`
-	Teams        []string                   `json:"teams"`
-	TeamSize     int                        `json:"teamSize"`
-	MinPlayers   int                        `json:"minPlayers"`
-	MaxPlayers   int                        `json:"maxPlayers"`
-	JoinTimeout  string                     `json:"joinTimeout"`
-	ReadyServers int                        `json:"readyServers"`
-	Lifecycle    minecraftMinigameLifecycle `json:"lifecycle"`
+	Enabled       *bool                               `json:"enabled,omitempty"`
+	TeamPolicy    string                              `json:"teamPolicy,omitempty"`
+	TeamCounts    map[string]int                      `json:"teamCounts,omitempty"`
+	RemainderTeam string                              `json:"remainderTeam,omitempty"`
+	Variants      map[string]minecraftMinigameVariant `json:"variants,omitempty"`
+	InstanceMode  string                              `json:"instanceMode,omitempty"`
+	LobbyMode     string                              `json:"lobbyMode,omitempty"`
+	Teams         []string                            `json:"teams"`
+	TeamSize      int                                 `json:"teamSize"`
+	MinPlayers    int                                 `json:"minPlayers"`
+	MaxPlayers    int                                 `json:"maxPlayers"`
+	JoinTimeout   string                              `json:"joinTimeout"`
+	ReadyServers  int                                 `json:"readyServers"`
+	Lifecycle     minecraftMinigameLifecycle          `json:"lifecycle"`
+}
+
+type minecraftMinigameVariant struct {
+	Teams         *[]string       `json:"teams,omitempty"`
+	TeamSize      *int            `json:"teamSize,omitempty"`
+	MinPlayers    *int            `json:"minPlayers,omitempty"`
+	MaxPlayers    *int            `json:"maxPlayers,omitempty"`
+	TeamPolicy    *string         `json:"teamPolicy,omitempty"`
+	TeamCounts    *map[string]int `json:"teamCounts,omitempty"`
+	RemainderTeam *string         `json:"remainderTeam,omitempty"`
+}
+
+type minecraftMinigameTeamCommand struct {
+	Team    string `json:"team"`
+	Command string `json:"command"`
 }
 
 type minecraftMinigameLifecycle struct {
 	Ready struct {
 		Trigger string `json:"trigger"`
 	} `json:"ready"`
-	OnAllJoined []minecraftMinigameCommand `json:"onAllJoined"`
-	End         struct {
+	OnAllJoined   []minecraftMinigameCommand     `json:"onAllJoined"`
+	TeamCommands  []minecraftMinigameTeamCommand `json:"teamCommands,omitempty"`
+	StartCommands []string                       `json:"startCommands,omitempty"`
+	End           struct {
 		LogPattern      string `json:"logPattern,omitempty"`
+		LoggerName      string `json:"loggerName,omitempty"`
 		WhenEmpty       bool   `json:"whenEmpty"`
 		EmptyGrace      string `json:"emptyGrace"`
 		ReturnPlayersTo string `json:"returnPlayersTo"`
@@ -49,6 +72,7 @@ type minecraftMinigameCommand struct {
 }
 
 var minecraftMinigameIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+var minecraftMinigameLoggerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 var minecraftMinigamePlaceholder = regexp.MustCompile(`\{([^{}]*)\}`)
 var minecraftMinigameRegexFlags = regexp.MustCompile(`\(\?([imsU-]+)[:)]`)
 var minecraftMinigameRegexOctal = regexp.MustCompile(`\\[1-7]`)
@@ -67,6 +91,16 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 	game := spec.Minigame
 	if game == nil {
 		return fmt.Errorf("minigame is required for mode minigames")
+	}
+	if game.Enabled == nil {
+		enabled := true
+		game.Enabled = &enabled
+	}
+	if game.TeamPolicy == "" {
+		game.TeamPolicy = "balanced"
+	}
+	if game.TeamPolicy != "balanced" && game.TeamPolicy != "roles" {
+		return fmt.Errorf("teamPolicy must be balanced or roles")
 	}
 	if game.LobbyMode == "" {
 		game.LobbyMode = "vestri"
@@ -105,6 +139,27 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 	if len(game.Teams) > 0 && game.MaxPlayers > len(game.Teams)*game.TeamSize {
 		return fmt.Errorf("maxPlayers must not exceed teams * teamSize")
 	}
+	if game.TeamPolicy == "balanced" && (len(game.TeamCounts) > 0 || game.RemainderTeam != "") {
+		return fmt.Errorf("balanced teamPolicy does not accept teamCounts or remainderTeam")
+	}
+	if game.TeamPolicy == "roles" {
+		if game.LobbyMode != "vestri" {
+			return fmt.Errorf("roles teamPolicy requires vestri lobbyMode")
+		}
+		if !seen[game.RemainderTeam] {
+			return fmt.Errorf("roles remainderTeam must name an existing team")
+		}
+		total := 0
+		for team, count := range game.TeamCounts {
+			if !seen[team] || count < 0 || count > game.TeamSize {
+				return fmt.Errorf("role counts must name existing teams and fit teamSize")
+			}
+			total += count
+		}
+		if total > game.MinPlayers || game.MaxPlayers-total+game.TeamCounts[game.RemainderTeam] > game.TeamSize {
+			return fmt.Errorf("role counts must fit minPlayers and remainder team capacity")
+		}
+	}
 	if game.ReadyServers < 0 || game.ReadyServers > spec.MaxInstances {
 		return fmt.Errorf("readyServers must be between 0 and maxInstances")
 	}
@@ -115,11 +170,24 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 	if lifecycle.Ready.Trigger != "serverLoad" && lifecycle.Ready.Trigger != "explicit" {
 		return fmt.Errorf("ready.trigger must be serverLoad or explicit")
 	}
-	if len(lifecycle.OnAllJoined) > 100 {
-		return fmt.Errorf("onAllJoined is limited to 100 commands")
+	if len(lifecycle.OnAllJoined)+len(lifecycle.TeamCommands)+len(lifecycle.StartCommands) > 100 {
+		return fmt.Errorf("lifecycle is limited to 100 commands combined")
 	}
-	if game.LobbyMode == "plugin" && len(lifecycle.OnAllJoined) > 0 {
-		return fmt.Errorf("onAllJoined must be empty in plugin lobby mode")
+	if game.LobbyMode == "plugin" && len(lifecycle.OnAllJoined)+len(lifecycle.TeamCommands)+len(lifecycle.StartCommands) > 0 {
+		return fmt.Errorf("lifecycle commands must be empty in plugin lobby mode")
+	}
+	for _, command := range lifecycle.TeamCommands {
+		if !seen[command.Team] {
+			return fmt.Errorf("teamCommands team must name an existing team")
+		}
+		if err := validateMinecraftMinigameCommand(minecraftMinigameCommand{Command: command.Command, ForEach: "player"}); err != nil {
+			return err
+		}
+	}
+	for _, command := range lifecycle.StartCommands {
+		if err := validateMinecraftMinigameCommand(minecraftMinigameCommand{Command: command}); err != nil {
+			return err
+		}
 	}
 	if lifecycle.OnAllJoined == nil {
 		lifecycle.OnAllJoined = []minecraftMinigameCommand{}
@@ -148,6 +216,9 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 		return fmt.Errorf("end.returnPlayersTo must be a safe server identifier")
 	}
 	pattern := lifecycle.End.LogPattern
+	if lifecycle.End.LoggerName != "" && !minecraftMinigameLoggerName.MatchString(lifecycle.End.LoggerName) {
+		return fmt.Errorf("end.loggerName must be 1-128 safe ASCII logger characters")
+	}
 	if len(pattern) > 512 || strings.ContainsAny(pattern, "\r\n") {
 		return fmt.Errorf("end.logPattern must be at most 512 bytes without newlines")
 	}
@@ -169,7 +240,63 @@ func validateMinecraftMinigame(spec *minecraftResourceSpec) error {
 			}
 		}
 	}
+	if len(game.Variants) > 20 {
+		return fmt.Errorf("variants is limited to 20 entries")
+	}
+	for name := range game.Variants {
+		if !minecraftMinigameIdentifier.MatchString(name) {
+			return fmt.Errorf("variant keys must be safe identifiers")
+		}
+		resolved, err := resolveMinecraftMinigameVariant(game, name)
+		if err != nil {
+			return err
+		}
+		if err := validateMinecraftMinigame(&minecraftResourceSpec{Mode: "minigames", MaxInstances: spec.MaxInstances, Minigame: resolved}); err != nil {
+			return fmt.Errorf("variant %s: %w", name, err)
+		}
+	}
 	return nil
+}
+
+func resolveMinecraftMinigameVariant(game *minecraftMinigameSpec, name string) (*minecraftMinigameSpec, error) {
+	content, err := json.Marshal(game)
+	if err != nil {
+		return nil, err
+	}
+	var resolved minecraftMinigameSpec
+	if err := json.Unmarshal(content, &resolved); err != nil {
+		return nil, err
+	}
+	variant, found := resolved.Variants[name]
+	resolved.Variants = nil
+	if name == "" {
+		return &resolved, nil
+	}
+	if !found {
+		return nil, fmt.Errorf("unknown minigame variant")
+	}
+	if variant.Teams != nil {
+		resolved.Teams = append([]string{}, (*variant.Teams)...)
+	}
+	if variant.TeamSize != nil {
+		resolved.TeamSize = *variant.TeamSize
+	}
+	if variant.MinPlayers != nil {
+		resolved.MinPlayers = *variant.MinPlayers
+	}
+	if variant.MaxPlayers != nil {
+		resolved.MaxPlayers = *variant.MaxPlayers
+	}
+	if variant.TeamPolicy != nil {
+		resolved.TeamPolicy = *variant.TeamPolicy
+	}
+	if variant.TeamCounts != nil {
+		resolved.TeamCounts = *variant.TeamCounts
+	}
+	if variant.RemainderTeam != nil {
+		resolved.RemainderTeam = *variant.RemainderTeam
+	}
+	return &resolved, nil
 }
 
 func defaultMinecraftMinigameDuration(value *string, fallback string) error {
@@ -238,6 +365,7 @@ type minecraftMinigameConfig struct {
 	ControlURL     string                 `json:"controlUrl"`
 	Spec           *minecraftMinigameSpec `json:"spec"`
 	SpawnRequestID string                 `json:"spawnRequestId,omitempty"`
+	Variant        string                 `json:"variant,omitempty"`
 }
 
 var minecraftMinigameToken = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -275,6 +403,9 @@ func readMinecraftMinigameConfig(ctx context.Context, worker pluginWorker, serve
 		if _, err := uuid.Parse(config.SpawnRequestID); err != nil {
 			return nil, fmt.Errorf("saved minigame spawn request ID is invalid")
 		}
+	}
+	if config.Variant != "" && !minecraftMinigameIdentifier.MatchString(config.Variant) {
+		return nil, fmt.Errorf("saved minigame variant is invalid")
 	}
 	return &config, nil
 }
@@ -327,7 +458,11 @@ func provisionMinecraftMinigame(ctx context.Context, worker pluginWorker, server
 	if _, err := rand.Read(random[:]); err != nil {
 		return fmt.Errorf("failed to generate minigame credentials")
 	}
-	content, err := json.Marshal(minecraftMinigameConfig{Slug: server.Slug, Token: hex.EncodeToString(random[:]), ControlURL: controlURL, Spec: spec.Minigame, SpawnRequestID: spawnRequestID})
+	resolved, err := resolveMinecraftMinigameVariant(spec.Minigame, "")
+	if err != nil {
+		return err
+	}
+	content, err := json.Marshal(minecraftMinigameConfig{Slug: server.Slug, Token: hex.EncodeToString(random[:]), ControlURL: controlURL, Spec: resolved, SpawnRequestID: spawnRequestID, Variant: spec.Variant})
 	if err != nil {
 		return err
 	}
@@ -401,6 +536,7 @@ func buildMinecraftProxyManifest(ctx context.Context, worker pluginWorker, paren
 			}
 			target["serverId"], target["template"], target["token"] = server.ID, template.Name, config.Token
 			target["id"], target["requestId"] = server.ID, instance.RequestID
+			target["variant"] = config.Variant
 			target["spec"] = minecraftMinigameManifestSpec{minecraftMinigameSpec: *config.Spec, MaxInstances: minigames[template.Name].MaxInstances}
 			if config.SpawnRequestID != "" {
 				target["spawnRequestId"] = config.SpawnRequestID

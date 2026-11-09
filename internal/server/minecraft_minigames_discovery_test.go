@@ -144,6 +144,9 @@ INSERT INTO "GameServer" ("id","nodeId","slug","name","templateId","stackName","
 	if strings.Contains(files[manifestPath], resource.Name) || reloads != 3 {
 		t.Fatal("deleted template remains discoverable", files[manifestPath])
 	}
+	t.Run("template_updates_and_variants", func(t *testing.T) {
+		testMinecraftMinigameTemplateUpdatesDatabase(t, ctx, api, database)
+	})
 	t.Run("instance_deletion", func(t *testing.T) {
 		testMinecraftInstanceDeletionDatabase(t, ctx, api, database)
 	})

@@ -28,6 +28,7 @@ type minecraftResourceSpec struct {
 	MaxInstances     int                    `json:"maxInstances,omitempty"`
 	Mode             string                 `json:"mode,omitempty"`
 	Minigame         *minecraftMinigameSpec `json:"minigame,omitempty"`
+	Variant          string                 `json:"-"`
 }
 
 type minecraftResourceFilesScopeKey struct{}
@@ -454,6 +455,12 @@ func (s *Server) handleCreateMinecraftResource(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) syncMinecraftResourceProxy(ctx context.Context, worker pluginWorker, resource *auth.MinecraftResource) error {
+	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	return s.syncMinecraftResourceProxyWithContext(syncCtx, worker, resource)
+}
+
+func (s *Server) syncMinecraftResourceProxyWithContext(ctx context.Context, worker pluginWorker, resource *auth.MinecraftResource) error {
 	if resource.Kind != "templates" {
 		return nil
 	}
@@ -464,16 +471,96 @@ func (s *Server) syncMinecraftResourceProxy(ctx context.Context, worker pluginWo
 	if spec.ParentID == "" {
 		return nil
 	}
-	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancel()
-	parent, err := s.Users.FindGameServerByRefForNode(syncCtx, resource.NodeID, spec.ParentID)
+	parent, err := s.Users.FindGameServerByRefForNode(ctx, resource.NodeID, spec.ParentID)
 	if err != nil {
 		return err
 	}
 	if parent == nil || !isVelocityServer(parent) {
 		return fmt.Errorf("template proxy is unavailable")
 	}
-	return s.syncMinecraftProxy(syncCtx, worker, resource.NodeID, parent, "")
+	return s.syncMinecraftProxy(ctx, worker, resource.NodeID, parent, "")
+}
+
+func (s *Server) saveMinecraftResourceSpec(ctx context.Context, worker pluginWorker, resource *auth.MinecraftResource, spec minecraftResourceSpec) (bool, error) {
+	content, err := json.Marshal(spec)
+	if err != nil {
+		return false, err
+	}
+	if err := s.Users.UpdateMinecraftResourceSpec(ctx, resource.NodeID, resource.ID, content); err != nil {
+		return false, err
+	}
+	resource.Spec = content
+	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	fileErr := s.workerWriteFile(syncCtx, worker.baseURL, worker.apiKey, path.Join(minecraftResourcePath(resource), "manifest.json"), string(content))
+	syncErr := s.syncMinecraftResourceProxyWithContext(syncCtx, worker, resource)
+	if fileErr != nil {
+		return true, fmt.Errorf("template saved, but worker manifest write failed; retry PATCH")
+	}
+	if syncErr != nil {
+		return true, fmt.Errorf("template saved, but proxy synchronization failed; retry proxy sync")
+	}
+	return true, nil
+}
+
+func (s *Server) handleUpdateMinecraftResource(w http.ResponseWriter, r *http.Request) {
+	_, node, ok := s.loadMinecraftAdmin(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Minigame     *minecraftMinigameSpec `json:"minigame"`
+		MaxInstances *int                   `json:"maxInstances"`
+	}
+	if decodeJSON(r, &request) != nil || request.Minigame == nil {
+		writeError(w, http.StatusBadRequest, "Full minigame settings are required")
+		return
+	}
+	unlock, err := s.lockNodePlugins(r.Context(), node.ID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	defer unlock()
+	resource, err := s.minecraftResource(r.Context(), node.ID, chi.URLParam(r, "resourceId"), "templates")
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Template not found")
+		return
+	}
+	var spec minecraftResourceSpec
+	if json.Unmarshal(resource.Spec, &spec) != nil || spec.Mode != "minigames" || spec.Minigame == nil {
+		writeError(w, http.StatusConflict, "Only minigame templates can be updated")
+		return
+	}
+	spec.Minigame = request.Minigame
+	if request.MaxInstances != nil {
+		spec.MaxInstances = *request.MaxInstances
+	}
+	if spec.MaxInstances < 1 || spec.MaxInstances > 100 {
+		writeError(w, http.StatusBadRequest, "maxInstances must be between 1 and 100")
+		return
+	}
+	if err := validateMinecraftMinigame(&spec); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	baseURL, apiKey, err := s.workerTargetFromNode(node)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Invalid worker configuration")
+		return
+	}
+	committed, err := s.saveMinecraftResourceSpec(r.Context(), pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, resource, spec)
+	if err != nil {
+		code := http.StatusInternalServerError
+		message := "Template update failed"
+		if committed {
+			code = http.StatusBadGateway
+			message = err.Error()
+		}
+		writeJSON(w, code, map[string]interface{}{"error": message, "committed": committed, "resource": resource})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"resource": resource})
 }
 
 func (s *Server) handleSyncMinecraftProxy(w http.ResponseWriter, r *http.Request) {
@@ -530,6 +617,33 @@ func (s *Server) handleDeleteMinecraftResource(w http.ResponseWriter, r *http.Re
 	}
 	for _, instance := range instances {
 		if instance.TemplateID == id {
+			var spec minecraftResourceSpec
+			if resource.Kind == "templates" && json.Unmarshal(resource.Spec, &spec) == nil && spec.Mode == "minigames" && spec.Minigame != nil {
+				if err := validateMinecraftMinigame(&spec); err != nil {
+					writeError(w, http.StatusConflict, "Template minigame metadata is invalid")
+					return
+				}
+				if *spec.Minigame.Enabled {
+					disabled := false
+					spec.Minigame.Enabled = &disabled
+					baseURL, apiKey, targetErr := s.workerTargetFromNode(node)
+					if targetErr != nil {
+						writeError(w, http.StatusBadGateway, "Invalid worker configuration")
+						return
+					}
+					committed, saveErr := s.saveMinecraftResourceSpec(r.Context(), pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, resource, spec)
+					if saveErr != nil {
+						code := http.StatusInternalServerError
+						if committed {
+							code = http.StatusBadGateway
+						}
+						writeJSON(w, code, map[string]interface{}{"error": "Pool disable failed; retry PATCH disable and proxy sync", "committed": committed, "resource": resource})
+						return
+					}
+				}
+				writeError(w, http.StatusConflict, "Pool disabled; delete instances and retry")
+				return
+			}
 			writeError(w, http.StatusConflict, "Delete template instances first")
 			return
 		}

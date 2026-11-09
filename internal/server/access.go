@@ -78,6 +78,7 @@ var endpointAccess = []AccessRule{
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/files/transfer", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/files/unzip", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/resources/{resourceId}/shared-plugins", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
+	{Method: http.MethodPatch, Path: "/api/nodes/{nodeRef}/minecraft/resources/{resourceId}", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/proxies/{proxyRef}/sync", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodPost, Path: "/api/nodes/{nodeRef}/minecraft/folders/create", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},
 	{Method: http.MethodGet, Path: "/api/nodes/{nodeRef}/servers/templates", Roles: []string{RoleUser, RoleAdmin, RoleEditor}},

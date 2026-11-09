@@ -21,6 +21,8 @@ Example template spec (use existing base/proxy resource IDs):
   "maxInstances": 3,
   "mode": "minigames",
   "minigame": {
+	"enabled": true,
+	"teamPolicy": "balanced",
     "instanceMode": "temporary",
     "lobbyMode": "vestri",
     "teams": ["red", "blue"],
@@ -37,6 +39,7 @@ Example template spec (use existing base/proxy resource IDs):
       ],
       "end": {
         "logPattern": "^MATCH_END$",
+        "loggerName": "my.minigame.Plugin",
         "whenEmpty": true,
         "emptyGrace": "10s",
         "returnPlayersTo": "lobby",
@@ -47,6 +50,38 @@ Example template spec (use existing base/proxy resource IDs):
 }
 ```
 
+- `enabled`: optional boolean, defaults to and serializes as `true` after
+  validation. Disabled templates stay in discovery with `enabled: false` but
+  spawn requests return HTTP 409, including saved-request retries. Compatible
+  coordinators must stop queue admissions and replenishment for disabled pools.
+  Disabling does not change any existing instance's pinned spec or lifecycle;
+  coordinators must ignore `enabled` when comparing instance compatibility.
+- `teamPolicy`: optional `balanced` (default) or `roles`. Balanced mode rejects
+  nonempty `teamCounts` and `remainderTeam`. Roles assign individual players,
+  intentionally allowing party splits, and require `lobbyMode: "vestri"` and
+  at least one declared team. Optional `teamCounts` maps existing,
+  case-sensitive team identifiers to exact nonnegative counts, each no greater
+  than `teamSize`. Required `remainderTeam` must name an existing team and gets
+  players remaining after the exact counts (in addition to any explicit count
+  for that team). Exact counts must fit `minPlayers`, and the remainder must fit
+  that team's `teamSize` at `maxPlayers`. Unspecified exact counts are zero.
+  The backend validates/transports
+  assignment settings; assignment itself belongs to the coordinator. For example,
+  `teams: ["speedrunner", "hunter"]`, `teamPolicy: "roles"`,
+  `teamCounts: {"speedrunner": 2}`, and `remainderTeam: "hunter"` assign exactly
+  two speedrunners and the rest hunters. Set `minPlayers >= 2`, a total
+  `maxPlayers`, and a `teamSize` large enough for each team's maximum occupancy.
+  At `minPlayers: 2` the roster may contain only speedrunners. Compatible
+  coordinators randomly select individuals, intentionally splitting parties;
+  this is not a security-grade randomness guarantee.
+- `variants`: optional map of up to 20 safe identifiers (same syntax as team
+  names) to overrides for `teams`, `teamSize`, `minPlayers`, `maxPlayers`,
+  `teamPolicy`, `teamCounts`, and `remainderTeam` only. Unspecified fields inherit
+  the base. Explicit `teams: []`, `teamCounts: {}`, numeric zero, and
+  `remainderTeam: ""` are retained as overrides, not treated as missing. Every
+  resolved variant passes the same validation as the base, including lifecycle
+  command compatibility with its teams. `readyServers` warms the base pool only;
+  variant pools are on demand. All variants and the base share `maxInstances`.
 - `instanceMode`: optional string, defaults to `temporary`; only `temporary`
   and `permanent` are accepted. Missing fields in legacy templates and saved
   instance configs normalize to `temporary`. Permanent instances require
@@ -60,8 +95,9 @@ Example template spec (use existing base/proxy resource IDs):
   `plugin` are accepted. `vestri` uses Vestri's minimum-player wait and
   `onAllJoined` startup actions. `plugin` delegates the lobby/start decision to
   the game plugin: Vestri does not wait for `minPlayers` or execute `onAllJoined`.
-  Nonempty `onAllJoined` is therefore rejected in plugin mode, not silently
-  ignored; send `[]`. Readiness still applies; ending applies to temporary
+  Nonempty `onAllJoined`, `teamCommands`, or `startCommands` is therefore
+  rejected in plugin mode, not silently ignored; send empty arrays.
+  Readiness still applies; ending applies to temporary
   instances only.
 - `teams`: optional, omitted/null/`[]` all normalize to `[]` for free-for-all
   games. Nonempty arrays contain at most 100 unique, case-sensitive identifiers matching
@@ -88,7 +124,7 @@ Example template spec (use existing base/proxy resource IDs):
   with the Java parser for concatenated ms/s/m/h components; sub-millisecond precision is rejected rather
   than rounded. `returnPlayersTo` defaults to `lobby`.
 - `ready.trigger`: required, `serverLoad` or `explicit`. `onAllJoined` is
-  an array of at most 100 commands (omitted/null becomes `[]`). Each command is
+  an array of commands (omitted/null becomes `[]`). Each command is
   1-1024 bytes, nonblank, without a leading slash (including after whitespace)
   or control characters/newlines. `forEach` is empty/omitted, `team`, or `player`.
   Only `{team}`, `{player}`, `{uuid}`, and `{matchId}` placeholders are accepted;
@@ -97,12 +133,38 @@ Example template spec (use existing base/proxy resource IDs):
   Without teams, both `forEach: "team"` (even without a placeholder) and
   `{team}` are rejected. Once-only commands and per-player `{player}`/`{uuid}`
   actions remain valid for team-free Vestri lobbies.
+- `lifecycle.teamCommands`: optional array of `{team, command}`. `team` is
+  required and must exactly match a declared team; `*` is not accepted. The
+  command runs per player assigned to that team and accepts `{player}`, `{uuid}`,
+  `{team}`, and `{matchId}` using the same validation as `forEach: "player"`.
+  `lifecycle.startCommands` is an optional string array of final once-only
+  commands; only `{matchId}` is accepted. `onAllJoined`, `teamCommands`, and
+  `startCommands` together are limited to 100 commands. Execution/order must be
+  implemented by compatible agents; the backend only transports the contract.
 - `end.logPattern` is optional, at most 512 bytes, and has no CR/LF. It must
   compile with Go's regexp engine; named groups, lookarounds/backreferences,
   ungreedy flags, POSIX classes, octal escapes without leading zero, and
   divergent Unicode/escape forms are rejected for practical Java compatibility.
   This is not a complete Java regex verifier or a Java execution-time bound;
   avoid pathological nested repetition and test patterns in the plugin runtime.
+  `end.loggerName`, when supplied, must match `[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}`.
+  It remains
+  optional in backend validation for legacy saved specs and retries. Editors
+  must require an explicit logger for new/edited nonempty patterns; compatible
+  Paper agents disable log matching and warn when the logger is absent or
+  unverified. It must exactly, case-sensitively match an installed gameplay
+  plugin's `getLogger().getName()`; verify it against that plugin's source or
+  runtime logger. Root/global, server/chat sources, and Vestri's own logger are
+  not trusted end sources. The backend validates logger syntax, not installed
+  plugin identity; that check belongs to Paper.
+  The current Paper matcher uses Java regex `find()` on the raw JUL
+  `LogRecord.getMessage()`, not formatted console output: `^xy$` matches `xy`
+  without a timestamp or prefix, while unanchored patterns match substrings.
+  It does not scrape stdout, Log4j, or SLF4J. Logger identity cannot distinguish
+  a real end signal from malicious player text logged by the gameplay plugin
+  itself through its trusted logger. An adapter issuing the console-only
+  `vestridynamic end` from actual game state provides a stronger integration;
+  explicit and empty-server end remain available when log matching is disabled.
 - `end.whenEmpty` is boolean (omitted means false); `end.deleteServer` must
   explicitly be `true` for temporary instances and must be `false` for permanent
   instances. Permanent instances also require `whenEmpty: false` and an empty
@@ -149,7 +211,7 @@ explicit authorized dashboard deletion remains available.
 
 Before instance startup, the backend writes
 `<instance root>/data/plugins/VestriConsoleBridge/minigame.json` containing
-`{slug, token, controlUrl, spec, spawnRequestId?}`. Optional `spawnRequestId` is
+`{slug, token, controlUrl, spec, spawnRequestId?, variant?}`. Optional `spawnRequestId` is
 the validated raw caller request UUID, preserved exactly for private correlation.
 `token` is a fresh cryptographically random
 64-character lowercase hex credential per instance, replacing any copied config.
@@ -166,6 +228,19 @@ execution fence from an existing instance.
 Fresh minigame spawns always replace copied `server.properties` player limits
 with `max-players=spec.minigame.maxPlayers`. Ordinary player limits are unchanged;
 saved-request retries do not rewrite server properties.
+
+Spawn accepts `{ "requestId": "<UUID>", "variant": "duel" }` through either
+the template-scoped API key endpoint or the dashboard spawn route. Omit
+`variant` or send `""` for the base; ordinary templates reject named variants.
+Unknown named variants return HTTP 400 without provisioning. The backend
+resolves a private copy before provisioning and stores a fully resolved `spec`
+without `variants` in the instance config. Its optional `variant` is the selected
+name; legacy absent values mean the base. Request-ID hashing is unchanged:
+reusing the same request ID with another variant returns HTTP 409 before worker
+mutations. Retries with the original variant preserve the saved spec, even if
+that variant has since been edited or removed from the template. Every private
+target includes `variant` from the saved config, defaulting to `""`, not from the
+current template. Top-level discovery retains the base and variant definitions.
 
 Proxy synchronization writes top-level `authoritative`, `minigames`, and `servers` in
 `vestri-dynamic-servers.json`. `minigames` maps the exact template **name** to
@@ -205,11 +280,13 @@ Manifest authority has these exact semantics:
 
 The top-level `maxInstances` value within each minigame entry remains the template
 cap, and `readyServers` has the mode-dependent pool/minimum semantics above.
-Each private `servers[slug].spec` has the same flattened shape as
+Each private `servers[slug].spec` has the same flattened layout as
 `minigames[templateName]`: inline minigame fields plus `maxInstances`, with no
 extra `minigame` wrapper, hash, or version. Its minigame fields come from the saved
 spawn-time instance `config.Spec`; only `maxInstances` uses the current template
 cap. The top-level template entry continues to contain the current template spec.
+Only top-level template entries contain variant definitions; instance specs are
+fully resolved snapshots without `variants`.
 Both shapes serialize normalized `instanceMode`, `lobbyMode`, and `teams: []`;
 old templates and saved instance configs without these modes normalize to
 `temporary` and `vestri`. Retry does not change a saved instance's modes or
@@ -218,6 +295,45 @@ The proxy can persist `target.spec` in its per-instance ledger and compare raw
 specs to drain mismatched ready instances, while active instances retain their
 original lifecycle. Ordinary server entries omit `spec`. This is a transport
 contract only; the backend does not perform draining or change plugin behavior.
+
+### Updating And Disabling Pools
+
+Session-authenticated node owners/admins can call
+`PATCH /api/nodes/{nodeRef}/minecraft/resources/{resourceId}` with
+`{ "minigame": <full settings>, "maxInstances": 3 }`. `maxInstances` is optional;
+`minigame` is a full replacement, not a partial merge. Only existing minigame
+templates can be updated. Other resource/spec fields are rejected, and template
+data/world/plugin files are never copied. Updates use the existing node plugin
+lock, shared with spawn, delete, and other library mutations.
+
+The dashboard uses this PATCH contract. Changed game settings apply to **new
+instances only**; existing instances and saved-request retries keep their pinned
+spawn-time settings, and active matches retain their original lifecycle.
+Compatible coordinators drain incompatible ready instances rather than rewriting
+their configuration. Setting `minigame.enabled: false` stops queue admissions
+and replenishment and removes queued entries, but does not end active matches.
+
+The database is authoritative: validation precedes a node-bound spec-only SQL
+update, followed by the template `manifest.json` and parent-proxy discovery sync.
+Post-commit file/sync work shares an independent 30-second budget and continues
+after request cancellation. Success returns HTTP 200 with `resource`. A database
+failure returns HTTP 500 with `committed: false` and does not mutate worker files.
+Post-commit failures return HTTP 502 with `committed: true` and `resource`:
+retry PATCH to repair a failed template-manifest write, or the existing manual
+proxy-sync endpoint to repair discovery/reload. A failed manifest write still
+attempts to publish the authoritative database state. No rollback deletes files
+or attempts to undo the committed spec.
+
+DELETE of an enabled minigame template with instances first persists
+`enabled: false`, writes its manifest, and syncs discovery under the same lock.
+After successful disable it returns HTTP 409 with
+`Pool disabled; delete instances and retry`, not a deletion success. Already
+disabled templates with instances return the same conflict. A disable's
+post-commit failure returns HTTP 502 with `committed: true`; repair publication
+using PATCH/sync. Explicit PATCH disable is also supported. Existing instances
+and their immutable lifecycle configs are left intact. After instances are
+removed, retry DELETE to remove the template normally. Ordinary templates retain
+the existing delete-instances-first behavior.
 
 Template creation synchronizes the parent proxy after database persistence,
 before returning success, so ready-pool discovery includes brand-new templates

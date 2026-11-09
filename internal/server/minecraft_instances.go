@@ -149,6 +149,7 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 	}
 	var request struct {
 		RequestID string `json:"requestId"`
+		Variant   string `json:"variant,omitempty"`
 	}
 	if decodeJSON(r, &request) != nil {
 		writeError(w, http.StatusBadRequest, "requestId is required")
@@ -180,6 +181,15 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusConflict, "Template minigame metadata is invalid: "+err.Error())
 		return
 	}
+	if request.Variant != "" && (spec.Mode != "minigames" || !minecraftMinigameIdentifier.MatchString(request.Variant)) {
+		writeError(w, http.StatusBadRequest, "variant requires a minigame template and safe identifier")
+		return
+	}
+	if spec.Minigame != nil && !*spec.Minigame.Enabled {
+		writeError(w, http.StatusConflict, "Template is disabled")
+		return
+	}
+	spec.Variant = request.Variant
 	requestHash := sha256.Sum256([]byte(keyID + ":" + request.RequestID))
 	requestID := hex.EncodeToString(requestHash[:])
 	instances, err := s.Users.ListMinecraftInstances(ctx, node.ID)
@@ -207,6 +217,15 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 			metadata := parseGameServerMetadata(server.Metadata)
 			var retryParent *auth.GameServer
 			if spec.Mode == "minigames" {
+				config, configErr := readMinecraftMinigameConfig(ctx, pluginWorker{server: s, baseURL: baseURL, apiKey: apiKey}, server)
+				if configErr != nil {
+					writeError(w, http.StatusBadGateway, "Failed to read saved minigame configuration")
+					return
+				}
+				if config.Variant != request.Variant {
+					writeError(w, http.StatusConflict, "requestId belongs to another variant")
+					return
+				}
 				retryParent, err = s.Users.FindGameServerByRefForNode(ctx, node.ID, metadata.ParentServerID)
 				if err != nil || retryParent == nil || !isVelocityServer(retryParent) {
 					writeError(w, http.StatusConflict, "The instance requires an existing Velocity proxy")
@@ -237,6 +256,17 @@ func (s *Server) handleSpawnMinecraftInstance(w http.ResponseWriter, r *http.Req
 		}
 		if instance.TemplateID == templateID {
 			active++
+		}
+	}
+	if spec.Minigame != nil {
+		spec.Minigame, err = resolveMinecraftMinigameVariant(spec.Minigame, request.Variant)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validateMinecraftMinigame(&spec); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 	}
 	if active >= spec.MaxInstances {
@@ -743,6 +773,7 @@ func (s *Server) registerMinecraftRoutes(r chi.Router) {
 		routes.Post(root+"/proxies/{proxyRef}/sync", s.handleSyncMinecraftProxy)
 		routes.Post(root+"/resources", s.handleCreateMinecraftResource)
 		routes.Post(root+"/resources/{resourceId}/shared-plugins", s.handleImportMinecraftSharedPlugins)
+		routes.Patch(root+"/resources/{resourceId}", s.handleUpdateMinecraftResource)
 		routes.Delete(root+"/resources/{resourceId}", s.handleDeleteMinecraftResource)
 		routes.Post(root+"/keys", s.handleCreateMinecraftAPIKey)
 		routes.Delete(root+"/keys/{keyId}", s.handleRevokeMinecraftAPIKey)
